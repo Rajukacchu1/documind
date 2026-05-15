@@ -1147,10 +1147,11 @@ def build_context(relevant_chunks):
     return "\n\n---\n\n".join(parts)
 
 
-def ask_llm(query: str, context: str, vision_images: list = None) -> str:
+def ask_llm(query: str, context: str, vision_images: list = None, table_query: bool = False) -> str:
     """
-    vision_images: optional list of (b64, src, page) for relevant non-table images
-                   that Claude should read as part of answering the query.
+    vision_images: optional list of (b64, src, page) for relevant non-table images.
+    table_query:   True when the user is asking for a schedule/table — triggers a
+                   strict "table only, no surrounding text" system prompt.
     """
     if not ANTHROPIC_OK:
         return f"(Anthropic SDK not installed)\n\nRelevant content found:\n\n{context[:2000]}"
@@ -1158,35 +1159,70 @@ def ask_llm(query: str, context: str, vision_images: list = None) -> str:
     if not api_key:
         return "⚠️ Please enter your Anthropic API key in the sidebar to enable AI answers."
     client = anthropic.Anthropic(api_key=api_key)
-    system = (
-        "You are a precise document extraction assistant. Return exact content — never paraphrase.\n\n"
-        "DOCUMENT RULES (most important):\n"
-        "- Each context block is labelled [Source: filename, Page: N].\n"
-        "- If the user names a specific document (e.g. 'from protocol', 'from DRP'), use ONLY "
-        "  chunks whose Source matches that document. Ignore all other sources completely.\n"
-        "- If the requested information is not found in the specified document, say exactly: "
-        "  'This information is not available in [document name].'\n"
-        "- NEVER pull information from a different document to fill gaps.\n\n"
-        "TOPIC FOCUS:\n"
-        "- Answer ONLY the specific topic asked. Do NOT reproduce surrounding paragraphs, "
-        "  unrelated sections, or the full document text.\n"
-        "- Extract the minimum content that directly answers the question.\n"
-        "- If the user names multiple documents, extract the topic from each separately.\n\n"
-        "ANSWER LENGTH RULES:\n"
-        "- For factual questions (dosage, date, name, number, eligibility criterion, etc.): "
-        "  answer in 1-5 sentences. Quote the exact text from the document, nothing more.\n"
-        "- For table/schedule requests: reproduce the COMPLETE table(s) verbatim, every row.\n"
-        "- NEVER dump entire sections or chapters. If the relevant answer is one sentence, "
-        "  return one sentence — not the surrounding page.\n\n"
-        "TABLE RULES:\n"
-        "- Every [TABLE]...[/TABLE] block → reproduce as a complete markdown table, every row.\n"
-        "- Columnar plain text → reconstruct as markdown table.\n"
-        "- If images are provided, read them; if they contain tables extract as markdown table.\n\n"
-        "FORMAT:\n"
-        "1. Bold heading matching the topic.\n"
-        "2. Exact content (concise for facts, complete for tables).\n"
-        "3. [Source: filename, Page: N]"
-    )
+
+    if table_query:
+        system = (
+            "You are a precise table extraction assistant.\n\n"
+            "DOCUMENT RULES:\n"
+            "- Each context block is labelled [Source: filename, Page: N].\n"
+            "- If the user names a specific document, use ONLY chunks from that document.\n"
+            "- NEVER mix data from different documents.\n\n"
+            "YOUR ONLY JOB FOR THIS REQUEST:\n"
+            "- Find every [TABLE]...[/TABLE] block that contains the assessment schedule / "
+            "  schedule of assessments / visit schedule.\n"
+            "- Reproduce each such table as a COMPLETE markdown table — every column header, "
+            "  every row, every cell. Do not skip any rows.\n"
+            "- If the table spans multiple context blocks, merge them into one continuous table.\n"
+            "- If an image is provided and it contains the schedule table, extract it as a "
+            "  markdown table.\n\n"
+            "OUTPUT FORMAT — strictly:\n"
+            "**[Table title from document]**\n"
+            "<complete markdown table>\n"
+            "[Source: filename, Page: N]\n\n"
+            "FORBIDDEN:\n"
+            "- Do NOT include any introductory sentences, explanations, footnotes, or surrounding text.\n"
+            "- Do NOT summarise or abbreviate any rows.\n"
+            "- Do NOT output anything except the heading, the markdown table, and the source citation."
+        )
+        instruction = (
+            "Extract and reproduce ONLY the assessment schedule table(s) as markdown. "
+            "No other text."
+        )
+    else:
+        system = (
+            "You are a precise document extraction assistant. Return exact content — never paraphrase.\n\n"
+            "DOCUMENT RULES (most important):\n"
+            "- Each context block is labelled [Source: filename, Page: N].\n"
+            "- If the user names a specific document (e.g. 'from protocol', 'from DRP'), use ONLY "
+            "  chunks whose Source matches that document. Ignore all other sources completely.\n"
+            "- If the requested information is not found in the specified document, say exactly: "
+            "  'This information is not available in [document name].'\n"
+            "- NEVER pull information from a different document to fill gaps.\n\n"
+            "TOPIC FOCUS:\n"
+            "- Answer ONLY the specific topic asked. Do NOT reproduce surrounding paragraphs, "
+            "  unrelated sections, or the full document text.\n"
+            "- Extract the minimum content that directly answers the question.\n"
+            "- If the user names multiple documents, extract the topic from each separately.\n\n"
+            "ANSWER LENGTH RULES:\n"
+            "- For factual questions (dosage, date, name, number, eligibility criterion, etc.): "
+            "  answer in 1-5 sentences. Quote the exact text from the document, nothing more.\n"
+            "- NEVER dump entire sections or chapters. If the relevant answer is one sentence, "
+            "  return one sentence — not the surrounding page.\n\n"
+            "TABLE RULES:\n"
+            "- Every [TABLE]...[/TABLE] block → reproduce as a complete markdown table, every row.\n"
+            "- Columnar plain text → reconstruct as markdown table.\n"
+            "- If images are provided, read them; if they contain tables extract as markdown table.\n\n"
+            "FORMAT:\n"
+            "1. Bold heading matching the topic.\n"
+            "2. Exact content (concise for facts, complete for tables).\n"
+            "3. [Source: filename, Page: N]"
+        )
+        instruction = (
+            "Extract ONLY the content about the specific topic asked, "
+            "from the correct source document only. "
+            "Reproduce tables in full as markdown tables."
+        )
+
     # Build message content — include vision images so Claude can read them
     user_content: list = []
     if vision_images:
@@ -1200,9 +1236,7 @@ def ask_llm(query: str, context: str, vision_images: list = None) -> str:
         "text": (
             f"Documents:\n{context}\n\n"
             f"User question: {query}\n\n"
-            "Instruction: Extract ONLY the content about the specific topic asked, "
-            "from the correct source document only. "
-            "Reproduce tables in full as markdown tables."
+            f"Instruction: {instruction}"
         ),
     })
     msg = client.messages.create(
@@ -1693,7 +1727,7 @@ else:
             display_images = _uniq_imgs   # no API key: show all unique images as fallback
 
         # Pass relevant images to LLM so it can read diagrams / figures
-        raw_answer = ask_llm(pending, context, vision_images=vision_images)
+        raw_answer = ask_llm(pending, context, vision_images=vision_images, table_query=_is_table_q)
         thinking_slot.empty()
         answer_html, _, extra_tables = render_answer(raw_answer, relevant)
 
