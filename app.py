@@ -479,6 +479,29 @@ hr { border-color: var(--border2) !important; }
     40%            { transform: scale(1.2); opacity: 1; }
 }
 
+/* ── Stop button ── */
+button[kind="secondary"][data-testid="baseButton-secondary"]:has(div:contains("⏹")) {
+    background: rgba(220,50,50,.15) !important;
+    border: 1px solid rgba(220,80,80,.5) !important;
+    color: #ff7070 !important;
+    border-radius: var(--radius) !important;
+    font-weight: 600 !important;
+    font-size: .82rem !important;
+    padding: 6px 18px !important;
+    transition: background .2s, box-shadow .2s !important;
+}
+button[kind="secondary"][data-testid="baseButton-secondary"]:has(div:contains("⏹")):hover {
+    background: rgba(220,50,50,.30) !important;
+    box-shadow: 0 0 10px rgba(220,50,50,.4) !important;
+}
+/* fallback: any button with stop text */
+[data-testid="stop_btn"] > button,
+button[key="stop_btn"] {
+    background: rgba(220,50,50,.15) !important;
+    border: 1px solid rgba(220,80,80,.5) !important;
+    color: #ff7070 !important;
+}
+
 /* ── Hide Streamlit chrome ── */
 #MainMenu, footer { visibility: hidden; }
 
@@ -1502,7 +1525,7 @@ else:
                     except Exception:
                         st.markdown(table_to_html(t), unsafe_allow_html=True)
 
-    # Thinking indicator — shown in bot position below the last user message
+    # Thinking indicator + Stop button — shown while query is pending
     thinking_slot = st.empty()
     if st.session_state.get("_pending_query"):
         thinking_slot.markdown("""
@@ -1518,47 +1541,60 @@ else:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Auto-scroll to latest message after every rerun
+    # Auto-scroll
     st.markdown("""
     <script>
     (function() {
         function scrollToBottom() {
             var chatWrap = document.querySelector('.chat-wrap');
-            if (chatWrap) {
-                chatWrap.scrollIntoView({ behavior: 'smooth', block: 'end' });
-            }
+            if (chatWrap) chatWrap.scrollIntoView({ behavior: 'smooth', block: 'end' });
             window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
         }
-        // Run after Streamlit finishes rendering
-        if (window.frameElement) {
-            setTimeout(scrollToBottom, 150);
-        } else {
-            setTimeout(scrollToBottom, 150);
-        }
+        setTimeout(scrollToBottom, 150);
     })();
     </script>
     """, unsafe_allow_html=True)
 
-    # Query input
+    # ── Input row: Send form OR Stop button ─────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
-    with st.form(key="query_form", clear_on_submit=True):
-        col_in, col_btn = st.columns([5, 1])
-        with col_in:
-            query = st.text_input(
-                "Ask a question",
-                placeholder="What does the document say about…?",
-                label_visibility="collapsed",
-            )
-        with col_btn:
-            submit = st.form_submit_button("Send ➤", use_container_width=True)
 
-    # Step 1 — user hits Send: show their message immediately, queue the query
-    if submit and query.strip():
-        st.session_state.messages.append({"role": "user", "content": query.strip()})
-        st.session_state["_pending_query"] = query.strip()
-        st.rerun()
+    if st.session_state.get("_pending_query"):
+        # While processing: show Stop button instead of the Send form
+        st.markdown("""
+        <style>
+        .stop-row { display:flex; align-items:center; gap:12px; padding:8px 0; }
+        .stop-hint { font-size:.8rem; color:#9090b8; font-family:'Inter',sans-serif; }
+        </style>
+        <div class="stop-row">
+            <span class="stop-hint">⏳ Searching documents…</span>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("⏹ Stop", key="stop_btn", use_container_width=False,
+                     help="Cancel this query"):
+            st.session_state.pop("_pending_query", None)
+            st.session_state.pop("_processing", None)
+            st.toast("Query cancelled.", icon="🛑")
+            st.rerun()
+    else:
+        with st.form(key="query_form", clear_on_submit=True):
+            col_in, col_btn = st.columns([5, 1])
+            with col_in:
+                query = st.text_input(
+                    "Ask a question",
+                    placeholder="What does the document say about…?",
+                    label_visibility="collapsed",
+                )
+            with col_btn:
+                submit = st.form_submit_button("Send ➤", use_container_width=True)
 
-    # Process pending query — runs after chat + thinking bubble are rendered
+        # Step 1 — user hits Send: show message immediately, queue the query
+        if submit and query.strip():
+            st.session_state.messages.append({"role": "user", "content": query.strip()})
+            st.session_state["_pending_query"] = query.strip()
+            st.rerun()
+
+    # Process pending query (only runs when _pending_query is still set after the
+    # Stop button check above — i.e., user did not click Stop on this rerun)
     if st.session_state.get("_pending_query"):
         from collections import Counter
         pending = st.session_state.pop("_pending_query")
