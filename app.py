@@ -667,6 +667,32 @@ def analyze_image(img_b64: str, query: str, api_key: str):
     return result
 
 
+# ── Table quality filter ──────────────────────────────────────────────────────
+def _is_quality_table(rows: list) -> bool:
+    """
+    Return True only for real structured tables.
+    Rejects word-position reconstruction noise where every cell is a single
+    word from a regular text paragraph.
+    A real clinical table has x/✓ markers, numbers, or multi-word row labels.
+    """
+    if not rows or len(rows) < 2:
+        return False
+    if max(len(r) for r in rows) < 3:
+        return False
+    cells = [str(c).strip() for r in rows for c in r if str(c).strip()]
+    if not cells:
+        return False
+    has_marker   = any(c.lower() in ("x", "yes", "no", "✓", "•", "-") for c in cells)
+    has_number   = any(re.match(r'^\d+$', c) for c in cells)
+    has_multiword = any(" " in c and len(c) > 4 for c in cells)
+    # Accept: has x-markers (schedule table), or has numbers + multi-word labels
+    if has_marker or (has_number and has_multiword):
+        return True
+    # Reject: >90% single-word cells with no markers → word-position noise
+    single = sum(1 for c in cells if " " not in c) / len(cells)
+    return single <= 0.90
+
+
 # ── Heading helpers ───────────────────────────────────────────────────────────
 def _extract_heading(text: str) -> str:
     """Return the first short line that looks like a section heading."""
@@ -1762,7 +1788,10 @@ else:
             # Select chunks: table queries use all relevant; heading queries use
             # only well-matched chunks, sorted best-match first.
             if _is_table_q:
-                render_chunks = relevant
+                # For table queries: prefer chunks whose heading scores > 0
+                # (near the schedule heading), fall back to all relevant only if needed.
+                sched_chunks = [c for c in relevant if c["_hscore"] > 0]
+                render_chunks = sched_chunks if sched_chunks else relevant
             else:
                 render_chunks = sorted(
                     [c for c in relevant if c["_hscore"] >= 2],
@@ -1779,10 +1808,10 @@ else:
             for c in render_chunks:
                 src, pg = c["source"], c["page"]
 
-                # Tables (extracted from PDF/DOCX structure)
+                # Tables — apply quality filter to reject word-position noise
                 for t in c.get("tables", []):
                     key = (src, pg)
-                    if key not in seen_tbl:
+                    if key not in seen_tbl and _is_quality_table(t):
                         seen_tbl.add(key)
                         direct_tables.append((t, src, pg))
 
@@ -1792,7 +1821,7 @@ else:
                         seen_img.add(b64)
                         if api_key and ANTHROPIC_OK:
                             kind, rows = analyze_image(b64, pending, api_key)
-                            if kind == "table" and rows:
+                            if kind == "table" and rows and _is_quality_table(rows):
                                 direct_tables.append((rows, src, pg))
                             elif kind == "relevant":
                                 direct_images.append((b64, src, pg))
@@ -1800,8 +1829,8 @@ else:
                         else:
                             direct_images.append((b64, src, pg))
 
-                # Text — only for chunks that have NO table (table IS the content)
-                if not c.get("tables") and c.get("text", "").strip():
+                # Text — only for non-table-query chunks that have NO extracted table
+                if not _is_table_q and not c.get("tables") and c.get("text", "").strip():
                     direct_texts.append((c["text"].strip(), src, pg))
 
             # Build the answer bubble: section heading + verbatim text (if any)
