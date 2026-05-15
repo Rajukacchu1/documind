@@ -1303,11 +1303,24 @@ with st.sidebar:
 
     if st.session_state.loaded_files:
         st.markdown("---")
-        st.markdown("**Loaded Files**")
+        st.markdown(
+            '<p style="font-size:.85rem;font-weight:700;color:#f0eeff;'
+            'margin:0 0 8px;letter-spacing:.04em;text-transform:uppercase;">Loaded Files</p>',
+            unsafe_allow_html=True,
+        )
+        icons = {"pdf":"📄","docx":"📝","txt":"📃","md":"📋","csv":"📊","xlsx":"📗","xls":"📗"}
         for fname in st.session_state.loaded_files:
-            ext = Path(fname).suffix.lower()
-            icon = {"pdf": "📄", "docx": "📝", "txt": "📃", "md": "📋", "csv": "📊", "xlsx": "📗", "xls": "📗"}.get(ext.lstrip("."), "📁")
-            st.markdown(f'<span style="font-size:.8rem;color:var(--text-muted);">{icon} {fname}</span>', unsafe_allow_html=True)
+            ext = Path(fname).suffix.lower().lstrip(".")
+            icon = icons.get(ext, "📁")
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:6px;'
+                f'padding:5px 8px;margin-bottom:4px;border-radius:6px;'
+                f'background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);">'
+                f'<span style="font-size:.9rem;">{icon}</span>'
+                f'<span style="font-size:.78rem;color:#c8c5ff;word-break:break-all;">{fname}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
     st.markdown("---")
     st.markdown('<span style="font-size:.75rem;color:var(--text-muted);letter-spacing:.04em;text-transform:uppercase;">API Key</span>', unsafe_allow_html=True)
