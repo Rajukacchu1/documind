@@ -671,26 +671,39 @@ def analyze_image(img_b64: str, query: str, api_key: str):
 def _is_quality_table(rows: list) -> bool:
     """
     Return True only for real structured tables.
-    Rejects word-position reconstruction noise where every cell is a single
-    word from a regular text paragraph.
-    A real clinical table has x/✓ markers, numbers, or multi-word row labels.
+
+    Two acceptance paths:
+    1. Schedule table: >= 4 standalone x/✓ markers in cells by themselves.
+       Protocol text pages never have this many bare 'x' cells.
+    2. Bordered/structural table (Method 1): consistent column count across
+       rows AND at least 2 multi-word cells (procedure/visit names).
+       Word-position noise has wildly varying column counts per row.
+
+    Everything else is rejected as word-position reconstruction noise.
     """
-    if not rows or len(rows) < 2:
+    if not rows or len(rows) < 3:
         return False
-    if max(len(r) for r in rows) < 3:
+    col_counts = [len(r) for r in rows]
+    if max(col_counts) < 3:
         return False
     cells = [str(c).strip() for r in rows for c in r if str(c).strip()]
     if not cells:
         return False
-    has_marker   = any(c.lower() in ("x", "yes", "no", "✓", "•", "-") for c in cells)
-    has_number   = any(re.match(r'^\d+$', c) for c in cells)
-    has_multiword = any(" " in c and len(c) > 4 for c in cells)
-    # Accept: has x-markers (schedule table), or has numbers + multi-word labels
-    if has_marker or (has_number and has_multiword):
+
+    # Path 1 — schedule table: many bare x / ✓ markers
+    _MARKERS = {"x", "X", "✓", "•", "x "}
+    x_count = sum(1 for c in cells if c in _MARKERS)
+    if x_count >= 4:
         return True
-    # Reject: >90% single-word cells with no markers → word-position noise
-    single = sum(1 for c in cells if " " not in c) / len(cells)
-    return single <= 0.90
+
+    # Path 2 — structural table: consistent column width + multi-word cells
+    avg_cols = sum(col_counts) / len(col_counts)
+    col_spread = max(col_counts) - min(col_counts)
+    multiword = sum(1 for c in cells if " " in c and len(c) > 6)
+    if col_spread <= 2 and avg_cols >= 3 and multiword >= 2:
+        return True
+
+    return False
 
 
 # ── Heading helpers ───────────────────────────────────────────────────────────
