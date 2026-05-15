@@ -479,28 +479,7 @@ hr { border-color: var(--border2) !important; }
     40%            { transform: scale(1.2); opacity: 1; }
 }
 
-/* ── Stop button ── */
-button[kind="secondary"][data-testid="baseButton-secondary"]:has(div:contains("⏹")) {
-    background: rgba(220,50,50,.15) !important;
-    border: 1px solid rgba(220,80,80,.5) !important;
-    color: #ff7070 !important;
-    border-radius: var(--radius) !important;
-    font-weight: 600 !important;
-    font-size: .82rem !important;
-    padding: 6px 18px !important;
-    transition: background .2s, box-shadow .2s !important;
-}
-button[kind="secondary"][data-testid="baseButton-secondary"]:has(div:contains("⏹")):hover {
-    background: rgba(220,50,50,.30) !important;
-    box-shadow: 0 0 10px rgba(220,50,50,.4) !important;
-}
-/* fallback: any button with stop text */
-[data-testid="stop_btn"] > button,
-button[key="stop_btn"] {
-    background: rgba(220,50,50,.15) !important;
-    border: 1px solid rgba(220,80,80,.5) !important;
-    color: #ff7070 !important;
-}
+/* ── Stop button — styled via dynamic injection in Python, not here ── */
 
 /* ── Hide Streamlit chrome ── */
 #MainMenu, footer { visibility: hidden; }
@@ -1075,8 +1054,15 @@ def retrieve(query: str, chunks, embeddings, top_k=5):
     result = [pool[candidate_local[i]] for i in top_local]
     result = result or pool[:top_k]
 
-    # Table-reference expansion: adjacent pages for table/schedule references
-    result = _expand_table_refs(result, pool)
+    # Table-reference expansion: only for schedule/table queries
+    _TABLE_Q_INNER = re.compile(
+        r'\b(assessment\s+schedule|schedule\s+of\s+assessments?|'
+        r'visit\s+schedule|time\s+and\s+events?|'
+        r'procedures?\s+and\s+assessments?)\b',
+        re.IGNORECASE
+    )
+    if _TABLE_Q_INNER.search(query):
+        result = _expand_table_refs(result, pool)
 
     # ── Targeted schedule/table search ──────────────────────────────────────
     # Only triggered when the query explicitly asks for a schedule or table.
@@ -1182,18 +1168,23 @@ def ask_llm(query: str, context: str, vision_images: list = None) -> str:
         "  'This information is not available in [document name].'\n"
         "- NEVER pull information from a different document to fill gaps.\n\n"
         "TOPIC FOCUS:\n"
-        "- Answer ONLY the specific topic asked. Ignore all other sections.\n"
+        "- Answer ONLY the specific topic asked. Do NOT reproduce surrounding paragraphs, "
+        "  unrelated sections, or the full document text.\n"
+        "- Extract the minimum content that directly answers the question.\n"
         "- If the user names multiple documents, extract the topic from each separately.\n\n"
-        "NO SUMMARISATION:\n"
-        "- Copy content verbatim — no paraphrasing, no abbreviating, no 'etc.'.\n"
-        "- If content is long, reproduce it ALL.\n\n"
+        "ANSWER LENGTH RULES:\n"
+        "- For factual questions (dosage, date, name, number, eligibility criterion, etc.): "
+        "  answer in 1-5 sentences. Quote the exact text from the document, nothing more.\n"
+        "- For table/schedule requests: reproduce the COMPLETE table(s) verbatim, every row.\n"
+        "- NEVER dump entire sections or chapters. If the relevant answer is one sentence, "
+        "  return one sentence — not the surrounding page.\n\n"
         "TABLE RULES:\n"
         "- Every [TABLE]...[/TABLE] block → reproduce as a complete markdown table, every row.\n"
         "- Columnar plain text → reconstruct as markdown table.\n"
         "- If images are provided, read them; if they contain tables extract as markdown table.\n\n"
         "FORMAT:\n"
         "1. Bold heading matching the topic.\n"
-        "2. Exact content.\n"
+        "2. Exact content (concise for facts, complete for tables).\n"
         "3. [Source: filename, Page: N]"
     )
     # Build message content — include vision images so Claude can read them
@@ -1580,11 +1571,29 @@ else:
     st.markdown("<br>", unsafe_allow_html=True)
 
     if st.session_state.get("_pending_query"):
-        # While processing: show Stop button instead of the Send form
+        # While processing: show Stop button instead of the Send form.
+        # Inject CSS here (not in global block) so it only targets the one button
+        # visible at this moment — the send form is hidden, so no false matches.
         st.markdown("""
         <style>
         .stop-row { display:flex; align-items:center; gap:12px; padding:8px 0; }
         .stop-hint { font-size:.8rem; color:#9090b8; font-family:'Inter',sans-serif; }
+        /* Valid selector: data-testid is the real attribute Streamlit sets on buttons */
+        button[data-testid="baseButton-secondary"] {
+            background: rgba(220,50,50,.22) !important;
+            border: 1.5px solid #ff5555 !important;
+            color: #ff7070 !important;
+            border-radius: 8px !important;
+            font-weight: 700 !important;
+            font-size: .88rem !important;
+            padding: 7px 22px !important;
+            min-width: 110px !important;
+            transition: background .2s, box-shadow .2s !important;
+        }
+        button[data-testid="baseButton-secondary"]:hover {
+            background: rgba(220,50,50,.40) !important;
+            box-shadow: 0 0 12px rgba(220,50,50,.45) !important;
+        }
         </style>
         <div class="stop-row">
             <span class="stop-hint">⏳ Searching documents…</span>
@@ -1619,7 +1628,14 @@ else:
     if st.session_state.get("_pending_query"):
         from collections import Counter
         pending = st.session_state.pop("_pending_query")
-        relevant = retrieve(pending, st.session_state.doc_chunks, st.session_state.embeddings, top_k=8)
+        _is_table_q = bool(re.search(
+            r'\b(assessment\s+schedule|schedule\s+of\s+assessments?|'
+            r'visit\s+schedule|time\s+and\s+events?|'
+            r'procedures?\s+and\s+assessments?)\b',
+            pending, re.IGNORECASE
+        ))
+        relevant = retrieve(pending, st.session_state.doc_chunks, st.session_state.embeddings,
+                            top_k=8 if _is_table_q else 5)
 
         # ── Hard document filter ──────────────────────────────────────────────
         # Re-run _doc_filter to find which documents the query refers to.
