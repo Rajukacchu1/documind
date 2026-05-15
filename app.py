@@ -1092,21 +1092,25 @@ def retrieve(query: str, chunks, embeddings, top_k=5):
             key=lambda x: x[1]   # ascending page order
         )
 
-        # Take only the first 2 anchors (schedule heading + maybe TOC mention)
-        # and add 8 pages forward from each — enough to capture multi-page tables
+        # Take only the first 2 anchors and add pages forward — enough for multi-page tables.
+        # Skip TOC-only mentions: prefer anchors where the heading is on a page that also
+        # has table data (extracted tables or x-grid markers).
+        X_GRID = re.compile(r'(?:^|\s)[xX](?:[\s\t]+[xX]){2,}', re.MULTILINE)
+        def _anchor_score(src_page):
+            c = by_src_page.get(src_page)
+            if not c:
+                return 0
+            has_table = 1 if c.get("tables") else 0
+            has_xgrid = 1 if X_GRID.search(c.get("text", "")) else 0
+            return has_table + has_xgrid
+
+        anchor_pages = sorted(anchor_pages, key=_anchor_score, reverse=True)
         for src, page in anchor_pages[:2]:
             for offset in range(-1, 9):
                 key = (src, page + offset)
                 if key in by_src_page and key not in seen_keys:
                     result.append(by_src_page[key])
                     seen_keys.add(key)
-
-        # Add any page with an extracted table (from find_tables / word-position)
-        for c in pool:
-            key = (c["source"], c["page"])
-            if key not in seen_keys and c.get("tables"):
-                result.append(c)
-                seen_keys.add(key)
 
     # ── Final trim: never send more than 12 chunks to the LLM ───────────────
     # Prioritise: pages with tables > pages matching schedule keywords > rest
@@ -1168,25 +1172,28 @@ def ask_llm(query: str, context: str, vision_images: list = None, table_query: b
             "- If the user names a specific document, use ONLY chunks from that document.\n"
             "- NEVER mix data from different documents.\n\n"
             "YOUR ONLY JOB FOR THIS REQUEST:\n"
-            "- Find every [TABLE]...[/TABLE] block that contains the assessment schedule / "
-            "  schedule of assessments / visit schedule.\n"
-            "- Reproduce each such table as a COMPLETE markdown table — every column header, "
+            f"- The user asked: \"{query}\"\n"
+            "- Identify the ONE table whose title or heading best matches the user's request.\n"
+            "- DO NOT return tables whose headings do not match — e.g. if the user asks for the "
+            "  'assessment schedule', do NOT return eligibility criteria tables, endpoint tables, "
+            "  or any other table.\n"
+            "- Reproduce that matched table as a COMPLETE markdown table — every column header, "
             "  every row, every cell. Do not skip any rows.\n"
-            "- If the table spans multiple context blocks, merge them into one continuous table.\n"
-            "- If an image is provided and it contains the schedule table, extract it as a "
-            "  markdown table.\n\n"
+            "- If the matching table spans multiple context blocks, merge them into one table.\n"
+            "- If an image is provided and its heading matches the request, extract it as markdown.\n\n"
             "OUTPUT FORMAT — strictly:\n"
-            "**[Table title from document]**\n"
+            "**[Exact table title from document]**\n"
             "<complete markdown table>\n"
             "[Source: filename, Page: N]\n\n"
             "FORBIDDEN:\n"
             "- Do NOT include any introductory sentences, explanations, footnotes, or surrounding text.\n"
+            "- Do NOT return unrelated tables.\n"
             "- Do NOT summarise or abbreviate any rows.\n"
             "- Do NOT output anything except the heading, the markdown table, and the source citation."
         )
         instruction = (
-            "Extract and reproduce ONLY the assessment schedule table(s) as markdown. "
-            "No other text."
+            f"Return ONLY the table whose heading matches: \"{query}\". "
+            "No other tables. No surrounding text."
         )
     else:
         system = (
