@@ -677,8 +677,10 @@ def extract_pdf(file_bytes: bytes, filename: str):
             base = doc.extract_image(xref)
             img_bytes = base["image"]
             images.append(img_to_b64(img_bytes))
-        # Detect tables via PyMuPDF find_tables
+        # ── Table extraction: try three methods in order ──────────────────────
         tables = []
+
+        # Method 1: PyMuPDF structural find_tables (best for bordered tables)
         try:
             tbl_list = page.find_tables()
             for t in tbl_list.tables:
@@ -687,14 +689,43 @@ def extract_pdf(file_bytes: bytes, filename: str):
                     tables.append([[str(c) if c is not None else "" for c in row] for row in rows])
         except Exception:
             pass
-        # Fallback for assessment-schedule pages: if page has x-marker grid but no
-        # structured table was detected, parse lines as a plain-text table
+
+        # Method 2: Word-position reconstruction (best for borderless/complex tables)
+        # Groups words by Y coordinate into rows, sorts by X within each row.
+        # Clinical assessment schedules score well here: wide tables with short cells.
         if not tables:
-            _X_GRID = re.compile(r'(?:^|\t| {2,})[xX](?:[\t ]+[xX]){2,}', re.MULTILINE)
-            if _X_GRID.search(text):
-                raw_rows = [re.split(r'\t| {2,}', l.rstrip()) for l in text.splitlines() if l.strip()]
-                raw_rows = [r for r in raw_rows if len(r) >= 2]
-                if raw_rows:
+            try:
+                words = page.get_text("words")  # (x0,y0,x1,y1,word,blk,ln,wrd)
+                if words and len(words) >= 15:
+                    TOL = 5  # pt — words within 5pt vertically = same row
+                    rows_by_y: dict = {}
+                    for w in words:
+                        y_key = round(w[1] / TOL) * TOL
+                        rows_by_y.setdefault(y_key, []).append((w[0], w[4]))
+                    sorted_rows = [
+                        [cell[1] for cell in sorted(cells, key=lambda c: c[0])]
+                        for _, cells in sorted(rows_by_y.items())
+                    ]
+                    if len(sorted_rows) >= 4:
+                        all_cells = [c for r in sorted_rows for c in r]
+                        avg_cols = sum(len(r) for r in sorted_rows) / len(sorted_rows)
+                        short_ratio = sum(1 for c in all_cells if len(c) <= 3) / max(len(all_cells), 1)
+                        # Wide table OR table with many short cells (x-markers, numbers)
+                        if avg_cols >= 6 or (avg_cols >= 3 and short_ratio >= 0.4):
+                            tables.append(sorted_rows)
+            except Exception:
+                pass
+
+        # Method 3: Line-split fallback for x-marker grids with any spacing
+        if not tables:
+            _XG = re.compile(r'\b[xX]\b.*\b[xX]\b.*\b[xX]\b', re.MULTILINE)
+            if _XG.search(text):
+                raw_rows = []
+                for line in text.splitlines():
+                    parts = re.split(r'\s{2,}|\t', line.rstrip())
+                    if len(parts) >= 2:
+                        raw_rows.append(parts)
+                if len(raw_rows) >= 3:
                     tables.append(raw_rows)
         if text or images or tables:
             chunks.append({
@@ -852,8 +883,9 @@ def _doc_filter(query: str, all_chunks: list) -> tuple:
     Return chunks restricted to every document whose name is mentioned in the
     query.  Supports multi-doc queries like 'from DRP and edit check file'.
     Falls back to all chunks when no document name matches.
+    When the query is about a schedule/table and no doc is named, prefer documents
+    whose name contains 'protocol' to avoid flooding with unrelated docs.
     """
-    import re
     q_lower = query.lower()
     sources = list({c["source"] for c in all_chunks})
 
@@ -863,6 +895,20 @@ def _doc_filter(query: str, all_chunks: list) -> tuple:
         meaningful = [w for w in stem if len(w) > 2]
         if any(w in q_lower for w in meaningful):
             matched.append(src)
+
+    if not matched:
+        # No doc name in query — check if it's a schedule/table query
+        SCHED_Q = re.compile(
+            r'\b(assessment\s+schedule|schedule\s+of\s+assessments?|'
+            r'visit\s+schedule|time\s+and\s+events?|table\s+\d)\b',
+            re.IGNORECASE
+        )
+        if SCHED_Q.search(query):
+            # Prefer protocol-named documents first; fall back to all if none found
+            proto_docs = [s for s in sources
+                          if re.search(r'protocol', Path(s).stem, re.IGNORECASE)]
+            if proto_docs:
+                matched = proto_docs
 
     matched_set = set(matched) if matched else {c["source"] for c in all_chunks}
     filtered = [(i, c) for i, c in enumerate(all_chunks) if c["source"] in matched_set]
