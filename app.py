@@ -1199,10 +1199,21 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-    folder_path = st.text_input(
-        "Or enter a folder path",
-        placeholder="/path/to/your/documents",
-    )
+    # Folder path only works when running locally (not on Streamlit Cloud)
+    _is_cloud = os.environ.get("STREAMLIT_SERVER_HEADLESS", "").lower() in ("1", "true")
+    if _is_cloud:
+        folder_path = ""
+        st.markdown(
+            '<div style="font-size:.75rem;color:var(--text-muted);padding:6px 10px;'
+            'background:var(--surface2);border:1px solid var(--border);border-radius:8px;'
+            'margin-top:4px;">📁 Folder path loading is only available when running locally.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        folder_path = st.text_input(
+            "Or enter a folder path",
+            placeholder="C:/path/to/your/documents",
+        )
 
     col1, col2 = st.columns(2)
     with col1:
