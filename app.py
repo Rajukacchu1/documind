@@ -594,54 +594,53 @@ def _get_media_type(img_b64: str) -> str:
     return "image/png"
 
 
-def analyze_image_for_table(img_b64: str, api_key: str):
+def analyze_image(img_b64: str, query: str, api_key: str):
     """
-    Send image to Claude Haiku vision and ask whether it is a table.
-    Returns (is_table: bool, rows: list | None).
-    Results are cached in session state so the same image is not re-sent.
+    Classify an image in the context of the user's query.
+    Returns (kind, data) where kind is:
+      "table"      → image is a table; data = list of rows
+      "relevant"   → image is relevant to the query (diagram, figure, text); data = None
+      "irrelevant" → logo, watermark, decoration; data = None
+    Results are cached per (img_b64, query) so the same image isn't re-sent twice.
     """
     if not ANTHROPIC_OK or not api_key:
-        return False, None
+        return "irrelevant", None
     cache = st.session_state.setdefault("_img_cache", {})
-    if img_b64 in cache:
-        return cache[img_b64]
+    cache_key = (img_b64[:64], query[:120])
+    if cache_key in cache:
+        return cache[cache_key]
     try:
         client = anthropic.Anthropic(api_key=api_key)
         media_type = _get_media_type(img_b64)
+        prompt = (
+            f"The user asked: \"{query[:200]}\"\n\n"
+            "Look at this image and respond with EXACTLY ONE of the following:\n\n"
+            "TABLE\n[[row1col1, row1col2, ...], [row2col1, ...], ...]\n"
+            "  → Use this if the image IS a table, data grid, or spreadsheet. "
+            "    Extract every row and column as a JSON array of arrays.\n\n"
+            "RELEVANT\n"
+            "  → Use this if the image is a diagram, chart, figure, flowchart, or contains "
+            "    text/data that is useful for answering the question.\n\n"
+            "IRRELEVANT\n"
+            "  → Use this if the image is a logo, watermark, company header, signature, "
+            "    decorative element, or otherwise unrelated to the question.\n\n"
+            "Reply with ONLY the category keyword (TABLE / RELEVANT / IRRELEVANT) "
+            "and, for TABLE only, the JSON array below it."
+        )
         msg = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=2048,
             messages=[{
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": media_type,
-                            "data": img_b64,
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            "Examine this image carefully.\n"
-                            "If it contains a TABLE, data grid, or spreadsheet: extract EVERY row "
-                            "and column as a JSON array of arrays. Example format:\n"
-                            "[[\"Header1\",\"Header2\",\"Header3\"],[\"Row1A\",\"Row1B\",\"Row1C\"]]\n"
-                            "Include ALL rows — do not truncate.\n\n"
-                            "If it is NOT a table (logo, photograph, diagram, chart, plain text): "
-                            "respond with exactly: NOT_TABLE\n\n"
-                            "Reply with ONLY the JSON array or NOT_TABLE — nothing else."
-                        ),
-                    },
+                    {"type": "image", "source": {
+                        "type": "base64", "media_type": media_type, "data": img_b64}},
+                    {"type": "text", "text": prompt},
                 ],
             }],
         )
         resp = msg.content[0].text.strip()
-        if "NOT_TABLE" in resp:
-            result = (False, None)
-        else:
+        if resp.startswith("TABLE"):
             import json
             m = re.search(r'\[[\s\S]*\]', resp)
             if m:
@@ -649,16 +648,20 @@ def analyze_image_for_table(img_b64: str, api_key: str):
                     data = json.loads(m.group())
                     if isinstance(data, list) and len(data) > 1:
                         rows = [[str(c) if c is not None else "" for c in row] for row in data]
-                        result = (True, rows)
+                        result = ("table", rows)
                     else:
-                        result = (False, None)
+                        result = ("relevant", None)
                 except Exception:
-                    result = (False, None)
+                    result = ("relevant", None)
             else:
-                result = (False, None)
+                result = ("relevant", None)
+        elif resp.startswith("RELEVANT"):
+            result = ("relevant", None)
+        else:
+            result = ("irrelevant", None)
     except Exception:
-        result = (False, None)
-    cache[img_b64] = result
+        result = ("irrelevant", None)
+    cache[cache_key] = result
     return result
 
 
@@ -878,33 +881,45 @@ def embed_chunks(chunks):
     return embedder.encode(texts, show_progress_bar=False)
 
 
+_DOC_GENERIC = {
+    "the", "and", "for", "from", "with", "data", "plan", "review", "file",
+    "spec", "guide", "form", "report", "list", "log", "test", "study",
+    "clinical", "trial", "version", "final", "draft", "new", "old", "doc",
+    "document", "template", "sample", "example", "ref", "information",
+}
+
+
 def _doc_filter(query: str, all_chunks: list) -> tuple:
     """
-    Return chunks restricted to every document whose name is mentioned in the
-    query.  Supports multi-doc queries like 'from DRP and edit check file'.
-    Falls back to all chunks when no document name matches.
-    When the query is about a schedule/table and no doc is named, prefer documents
-    whose name contains 'protocol' to avoid flooding with unrelated docs.
+    Restrict chunks to documents whose name is mentioned in the query.
+    Uses a generic-word stoplist so common filename words (data, plan, review…)
+    don't cause false matches across unrelated documents.
+    Falls back to all chunks only when truly no document name is detected.
     """
     q_lower = query.lower()
     sources = list({c["source"] for c in all_chunks})
 
     matched = []
     for src in sources:
-        stem = re.split(r'[\s\-_\.]', Path(src).stem.lower())
-        meaningful = [w for w in stem if len(w) > 2]
-        if any(w in q_lower for w in meaningful):
+        stem = Path(src).stem
+        # Split on common separators, lowercase each part
+        parts = re.split(r'[\s\-_\.]+', stem.lower())
+        # Keep only distinctive identifiers: len ≥ 3 and not generic
+        distinctive = [p for p in parts if len(p) >= 3 and p not in _DOC_GENERIC]
+        # Also test the full stem (space-normalised) as a phrase
+        stem_phrase = re.sub(r'[\-_\.]+', ' ', stem.lower())
+        identifiers = distinctive + [stem_phrase]
+        if any(ident and ident in q_lower for ident in identifiers):
             matched.append(src)
 
     if not matched:
-        # No doc name in query — check if it's a schedule/table query
+        # For schedule/table queries prefer protocol-named documents
         SCHED_Q = re.compile(
             r'\b(assessment\s+schedule|schedule\s+of\s+assessments?|'
             r'visit\s+schedule|time\s+and\s+events?|table\s+\d)\b',
             re.IGNORECASE
         )
         if SCHED_Q.search(query):
-            # Prefer protocol-named documents first; fall back to all if none found
             proto_docs = [s for s in sources
                           if re.search(r'protocol', Path(s).stem, re.IGNORECASE)]
             if proto_docs:
@@ -912,7 +927,6 @@ def _doc_filter(query: str, all_chunks: list) -> tuple:
 
     matched_set = set(matched) if matched else {c["source"] for c in all_chunks}
     filtered = [(i, c) for i, c in enumerate(all_chunks) if c["source"] in matched_set]
-
     indices = [i for i, _ in filtered]
     pool    = [c for _, c in filtered]
     return pool, indices
@@ -1103,46 +1117,64 @@ def build_context(relevant_chunks):
     return "\n\n---\n\n".join(parts)
 
 
-def ask_llm(query: str, context: str) -> str:
+def ask_llm(query: str, context: str, vision_images: list = None) -> str:
+    """
+    vision_images: optional list of (b64, src, page) for relevant non-table images
+                   that Claude should read as part of answering the query.
+    """
     if not ANTHROPIC_OK:
-        # Simple keyword extraction fallback
         return f"(Anthropic SDK not installed)\n\nRelevant content found:\n\n{context[:2000]}"
     api_key = st.session_state.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return "⚠️ Please enter your Anthropic API key in the sidebar to enable AI answers."
     client = anthropic.Anthropic(api_key=api_key)
     system = (
-        "You are a precise document extraction assistant. Your ONLY job is to return the exact "
-        "content from the documents — never paraphrase, never summarise, never add commentary.\n\n"
+        "You are a precise document extraction assistant. Return exact content — never paraphrase.\n\n"
+        "DOCUMENT RULES (most important):\n"
+        "- Each context block is labelled [Source: filename, Page: N].\n"
+        "- If the user names a specific document (e.g. 'from protocol', 'from DRP'), use ONLY "
+        "  chunks whose Source matches that document. Ignore all other sources completely.\n"
+        "- If the requested information is not found in the specified document, say exactly: "
+        "  'This information is not available in [document name].'\n"
+        "- NEVER pull information from a different document to fill gaps.\n\n"
         "TOPIC FOCUS:\n"
-        "- Answer ONLY the specific topic the user asked about. Ignore all other sections.\n"
-        "- 'AE' or 'adverse event' → return ONLY adverse event content.\n"
-        "- 'assessment schedule' → return ONLY the schedule/table, nothing else.\n"
-        "- 'demographic data review' → return ONLY demographic content.\n"
-        "- If the user names multiple documents, extract the topic from each and present per-document.\n\n"
-        "NO SUMMARISATION — STRICT:\n"
-        "- NEVER summarise, abbreviate, or paraphrase any content.\n"
-        "- NEVER write 'The table shows…' or 'The schedule includes…' — just reproduce the content.\n"
-        "- If the content is long, reproduce it ALL — do not truncate or say 'etc.'.\n"
-        "- Copy text verbatim from the source.\n\n"
+        "- Answer ONLY the specific topic asked. Ignore all other sections.\n"
+        "- If the user names multiple documents, extract the topic from each separately.\n\n"
+        "NO SUMMARISATION:\n"
+        "- Copy content verbatim — no paraphrasing, no abbreviating, no 'etc.'.\n"
+        "- If content is long, reproduce it ALL.\n\n"
         "TABLE RULES:\n"
-        "- Every [TABLE]...[/TABLE] block MUST be reproduced as a complete markdown table — "
-        "every row, every column, no exceptions.\n"
-        "- Never convert a table to prose or bullet points.\n"
-        "- When plain text has columnar alignment (spaces/tabs), reconstruct it as a markdown table.\n"
-        "- Large tables must be reproduced in full — do NOT summarise rows.\n\n"
+        "- Every [TABLE]...[/TABLE] block → reproduce as a complete markdown table, every row.\n"
+        "- Columnar plain text → reconstruct as markdown table.\n"
+        "- If images are provided, read them; if they contain tables extract as markdown table.\n\n"
         "FORMAT:\n"
-        "1. Start with a bold section heading matching the topic asked.\n"
-        "2. Reproduce exact document content below the heading.\n"
-        "3. End with: [Source: filename, Page: N]\n\n"
-        "MISSING CONTENT: Only say 'This information is not found' if the topic is truly absent "
-        "from the provided context. If partial content exists, reproduce what is there."
+        "1. Bold heading matching the topic.\n"
+        "2. Exact content.\n"
+        "3. [Source: filename, Page: N]"
     )
+    # Build message content — include vision images so Claude can read them
+    user_content: list = []
+    if vision_images:
+        for b64, src, page in vision_images[:6]:
+            user_content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": _get_media_type(b64), "data": b64},
+            })
+    user_content.append({
+        "type": "text",
+        "text": (
+            f"Documents:\n{context}\n\n"
+            f"User question: {query}\n\n"
+            "Instruction: Extract ONLY the content about the specific topic asked, "
+            "from the correct source document only. "
+            "Reproduce tables in full as markdown tables."
+        ),
+    })
     msg = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=4096,
         system=system,
-        messages=[{"role": "user", "content": f"Documents:\n{context}\n\nUser question: {query}\n\nInstruction: Extract ONLY the content about the specific topic asked. If a [TABLE] block is present, show it as a markdown table."}],
+        messages=[{"role": "user", "content": user_content}],
     )
     return msg.content[0].text
 
@@ -1513,9 +1545,10 @@ else:
         relevant = retrieve(pending, st.session_state.doc_chunks, st.session_state.embeddings, top_k=8)
         context  = build_context(relevant)
 
-        # ── Image pre-classification (before LLM call) ───────────────────────
-        # Deduplicate images (filter logos that repeat across pages)
+        # ── Image classification (table / relevant / irrelevant) ─────────────
         api_key = st.session_state.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
+
+        # Deduplicate: images appearing on multiple pages are logos → discard
         _img_cnt: Counter = Counter()
         for c in relevant:
             for b64 in c.get("images", []):
@@ -1528,27 +1561,32 @@ else:
                     _uniq_imgs.append((b64, c["source"], c["page"]))
                     _seen_b64.add(b64)
 
-        display_images: list = []
-        img_tables: list = []
+        display_images: list = []   # relevant non-table images → shown to user
+        vision_images:  list = []   # same, passed to LLM for reading
+        img_tables:     list = []   # table images → shown as dataframes
+
         if api_key and ANTHROPIC_OK and _uniq_imgs:
             with st.spinner("Analysing images…"):
-                for b64, src, page in _uniq_imgs[:8]:
-                    is_tbl, rows = analyze_image_for_table(b64, api_key)
-                    if is_tbl and rows:
+                for b64, src, page in _uniq_imgs[:10]:
+                    kind, rows = analyze_image(b64, pending, api_key)
+                    if kind == "table" and rows:
                         img_tables.append((rows, src, page))
-                        # Include image-extracted table in LLM context
+                        # Append image-extracted table to text context
                         cols = len(rows[0])
-                        hdr = "| " + " | ".join(str(x) for x in rows[0]) + " |"
+                        hdr    = "| " + " | ".join(str(x) for x in rows[0]) + " |"
                         sep_ln = "| " + " | ".join("---" for _ in range(cols)) + " |"
-                        body = "\n".join("| " + " | ".join(str(x) for x in r) + " |" for r in rows[1:])
+                        body   = "\n".join("| " + " | ".join(str(x) for x in r) + " |" for r in rows[1:])
                         context += (f"\n\n---\n\n[Image Table from {src}, Page {page}]"
                                     f"\n[TABLE]\n{hdr}\n{sep_ln}\n{body}\n[/TABLE]")
-                    else:
+                    elif kind == "relevant":
                         display_images.append((b64, src, page))
+                        vision_images.append((b64, src, page))
+                    # irrelevant → silently dropped
         else:
-            display_images = _uniq_imgs
+            display_images = _uniq_imgs   # no API key: show all unique images as fallback
 
-        raw_answer = ask_llm(pending, context)
+        # Pass relevant images to LLM so it can read diagrams / figures
+        raw_answer = ask_llm(pending, context, vision_images=vision_images)
         thinking_slot.empty()
         answer_html, _, extra_tables = render_answer(raw_answer, relevant)
 
