@@ -667,6 +667,40 @@ def analyze_image(img_b64: str, query: str, api_key: str):
     return result
 
 
+# ── Heading helpers ───────────────────────────────────────────────────────────
+def _extract_heading(text: str) -> str:
+    """Return the first short line that looks like a section heading."""
+    for line in text.splitlines():
+        line = line.strip()
+        if (line
+                and 4 <= len(line) <= 120
+                and not line.endswith('.')
+                and not re.match(r'^\d+$', line)
+                and not re.match(r'^page\s*\d+$', line, re.I)):
+            return line
+    return ""
+
+
+_H_STOP = {
+    "the","a","an","is","in","on","at","to","for","of","and","or","from",
+    "with","by","as","be","are","was","this","that","its","not","but",
+    "show","give","get","provide","tell","list","what","which","how","me",
+}
+
+def _heading_match(query: str, heading: str) -> int:
+    """Count overlapping meaningful words (prefix-aware) between query and heading."""
+    def _w(s):
+        return {w for w in re.findall(r'\b\w{3,}\b', s.lower()) if w not in _H_STOP}
+    q, h = _w(query), _w(heading)
+    count = 0
+    for qw in q:
+        for hw in h:
+            if qw == hw or (len(qw) >= 5 and (qw.startswith(hw[:5]) or hw.startswith(qw[:5]))):
+                count += 1
+                break
+    return count
+
+
 def extract_pdf(file_bytes: bytes, filename: str):
     """Extract text, tables, images chunk-by-chunk from PDF."""
     chunks = []
@@ -735,6 +769,7 @@ def extract_pdf(file_bytes: bytes, filename: str):
         if text or images or tables:
             chunks.append({
                 "text": text,
+                "heading": _extract_heading(text),
                 "source": filename,
                 "page": page_num,
                 "images": images,
@@ -778,8 +813,10 @@ def extract_docx(file_bytes: bytes, filename: str):
                 images.append(img_to_b64(img_bytes))
             except Exception:
                 pass
+    body = "\n".join(text_parts)
     chunks.append({
-        "text": "\n".join(text_parts),
+        "text": body,
+        "heading": _extract_heading(body),
         "source": filename,
         "page": 1,
         "images": images,
@@ -1709,43 +1746,132 @@ else:
                     _uniq_imgs.append((b64, c["source"], c["page"]))
                     _seen_b64.add(b64)
 
-        display_images: list = []   # relevant non-table images → shown to user
-        vision_images:  list = []   # same, passed to LLM for reading
-        img_tables:     list = []   # table images → shown as dataframes
+        # ── Score each chunk by heading match ────────────────────────────────
+        for c in relevant:
+            c["_hscore"] = _heading_match(pending, c.get("heading", ""))
+        best_hscore = max((c["_hscore"] for c in relevant), default=0)
 
-        if api_key and ANTHROPIC_OK and _uniq_imgs:
-            with st.spinner("Analysing images…"):
-                for b64, src, page in _uniq_imgs[:10]:
-                    kind, rows = analyze_image(b64, pending, api_key)
-                    if kind == "table" and rows:
-                        img_tables.append((rows, src, page))
-                        # Append image-extracted table to text context
-                        cols = len(rows[0])
-                        hdr    = "| " + " | ".join(str(x) for x in rows[0]) + " |"
-                        sep_ln = "| " + " | ".join("---" for _ in range(cols)) + " |"
-                        body   = "\n".join("| " + " | ".join(str(x) for x in r) + " |" for r in rows[1:])
-                        context += (f"\n\n---\n\n[Image Table from {src}, Page {page}]"
-                                    f"\n[TABLE]\n{hdr}\n{sep_ln}\n{body}\n[/TABLE]")
-                    elif kind == "relevant":
-                        display_images.append((b64, src, page))
-                        vision_images.append((b64, src, page))
-                    # irrelevant → silently dropped
+        # ── Route: direct render (structure-preserving) vs LLM ───────────────
+        # Direct render when:
+        #   • query is explicitly for a table/schedule (_is_table_q), OR
+        #   • query matches a section heading with ≥2 meaningful words
+        use_direct = _is_table_q or best_hscore >= 2
+
+        if use_direct:
+            # ── DIRECT RENDER — preserve document structure exactly ───────────
+            # Select chunks: table queries use all relevant; heading queries use
+            # only well-matched chunks, sorted best-match first.
+            if _is_table_q:
+                render_chunks = relevant
+            else:
+                render_chunks = sorted(
+                    [c for c in relevant if c["_hscore"] >= 2],
+                    key=lambda c: (-c["_hscore"], c["page"]),
+                )
+
+            # Classify each chunk by its dominant content type
+            direct_tables:  list = []
+            direct_images:  list = []
+            direct_texts:   list = []
+            seen_tbl:  set = set()
+            seen_img:  set = set()
+
+            for c in render_chunks:
+                src, pg = c["source"], c["page"]
+
+                # Tables (extracted from PDF/DOCX structure)
+                for t in c.get("tables", []):
+                    key = (src, pg)
+                    if key not in seen_tbl:
+                        seen_tbl.add(key)
+                        direct_tables.append((t, src, pg))
+
+                # Images — classify and collect
+                for b64 in c.get("images", []):
+                    if b64 not in seen_img:
+                        seen_img.add(b64)
+                        if api_key and ANTHROPIC_OK:
+                            kind, rows = analyze_image(b64, pending, api_key)
+                            if kind == "table" and rows:
+                                direct_tables.append((rows, src, pg))
+                            elif kind == "relevant":
+                                direct_images.append((b64, src, pg))
+                            # irrelevant → dropped
+                        else:
+                            direct_images.append((b64, src, pg))
+
+                # Text — only for chunks that have NO table (table IS the content)
+                if not c.get("tables") and c.get("text", "").strip():
+                    direct_texts.append((c["text"].strip(), src, pg))
+
+            # Build the answer bubble: section heading + verbatim text (if any)
+            import html as _html_mod
+            top_heading = ""
+            if render_chunks:
+                best = max(render_chunks, key=lambda c: c["_hscore"])
+                top_heading = best.get("heading") or pending.strip().title()
+            answer_html = f"<b>{_html_mod.escape(top_heading)}</b>"
+
+            if direct_texts and not _is_table_q:
+                text_html = "<br><br>".join(
+                    _html_mod.escape(txt).replace("\n", "<br>")
+                    + f'<br><span style="font-size:.75rem;color:#9090b8">'
+                    f'[{_html_mod.escape(src)}, Page {pg}]</span>'
+                    for txt, src, pg in direct_texts
+                )
+                answer_html += "<br><br>" + text_html
+
+            thinking_slot.empty()
+            sources = list({f"{c['source']} p.{c['page']}" for c in render_chunks})
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": top_heading,
+                "answer_html": answer_html,
+                "images": direct_images,
+                "tables": direct_tables,
+                "sources": sources,
+            })
+
         else:
-            display_images = _uniq_imgs   # no API key: show all unique images as fallback
+            # ── LLM PATH — open-ended questions with no strong heading match ──
+            display_images: list = []
+            vision_images:  list = []
+            img_tables:     list = []
 
-        # Pass relevant images to LLM so it can read diagrams / figures
-        raw_answer = ask_llm(pending, context, vision_images=vision_images, table_query=_is_table_q)
-        thinking_slot.empty()
-        answer_html, _, extra_tables = render_answer(raw_answer, relevant)
+            if api_key and ANTHROPIC_OK and _uniq_imgs:
+                with st.spinner("Analysing images…"):
+                    for b64, src, page in _uniq_imgs[:10]:
+                        kind, rows = analyze_image(b64, pending, api_key)
+                        if kind == "table" and rows:
+                            img_tables.append((rows, src, page))
+                            cols   = len(rows[0])
+                            hdr    = "| " + " | ".join(str(x) for x in rows[0]) + " |"
+                            sep_ln = "| " + " | ".join("---" for _ in range(cols)) + " |"
+                            body   = "\n".join(
+                                "| " + " | ".join(str(x) for x in r) + " |" for r in rows[1:]
+                            )
+                            context += (f"\n\n---\n\n[Image Table from {src}, Page {page}]"
+                                        f"\n[TABLE]\n{hdr}\n{sep_ln}\n{body}\n[/TABLE]")
+                        elif kind == "relevant":
+                            display_images.append((b64, src, page))
+                            vision_images.append((b64, src, page))
+            else:
+                display_images = _uniq_imgs
 
-        sources = list({f"{c['source']} p.{c['page']}" for c in relevant})
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": raw_answer,
-            "answer_html": answer_html,
-            "images": display_images,
-            "tables": extra_tables + img_tables,
-            "sources": sources,
-        })
+            raw_answer = ask_llm(pending, context, vision_images=vision_images,
+                                 table_query=_is_table_q)
+            thinking_slot.empty()
+            answer_html, _, extra_tables = render_answer(raw_answer, relevant)
+
+            sources = list({f"{c['source']} p.{c['page']}" for c in relevant})
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": raw_answer,
+                "answer_html": answer_html,
+                "images": display_images,
+                "tables": extra_tables + img_tables,
+                "sources": sources,
+            })
+
         st.rerun()
 
