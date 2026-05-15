@@ -976,9 +976,12 @@ def _expand_table_refs(retrieved: list, pool: list) -> list:
     by_src_page = {(c["source"], c["page"]): c for c in pool}
     seen  = {(c["source"], c["page"]) for c in retrieved}
     extra = []
+    _MAX_EXTRA = 10  # never add more than 10 pages via expansion
 
     def _add_window(src, center_page, before, after):
         for offset in range(-before, after + 1):
+            if len(extra) >= _MAX_EXTRA:
+                return
             if offset == 0:
                 continue
             key = (src, center_page + offset)
@@ -1075,47 +1078,65 @@ def retrieve(query: str, chunks, embeddings, top_k=5):
     # Table-reference expansion: adjacent pages for table/schedule references
     result = _expand_table_refs(result, pool)
 
-    # ── Deep schedule/table search ──────────────────────────────────────────
-    # When the query explicitly asks for a schedule or named table:
-    # 1. Scan the ENTIRE pool for any page whose text mentions schedule/table keywords
-    # 2. Add those "anchor" pages + the next 12 pages (the actual table follows)
-    # 3. Also add any page that has an extracted table (regardless of semantic score)
-    # This does NOT require c.get("tables") so it works even when find_tables() fails.
+    # ── Targeted schedule/table search ──────────────────────────────────────
+    # Only triggered when the query explicitly asks for a schedule or table.
+    # KEY CHANGE: anchor uses schedule-specific keywords ONLY — NOT generic
+    # "Table X.X" references (those appear on every page of a protocol and
+    # previously caused the entire document to be returned).
     TABLE_Q = re.compile(
         r'\b(assessment\s+schedule|schedule\s+of\s+assessments?|'
-        r'table\s+\d|visit\s+schedule|time\s+and\s+events?|'
-        r'procedures?\s+and\s+assessments?|schedule\s+table)\b',
+        r'visit\s+schedule|time\s+and\s+events?|'
+        r'procedures?\s+and\s+assessments?)\b',
         re.IGNORECASE
     )
     if TABLE_Q.search(query):
         by_src_page = {(c["source"], c["page"]): c for c in pool}
-        seen_keys = {(c["source"], c["page"]) for c in result}
+        seen_keys   = {(c["source"], c["page"]) for c in result}
 
-        # Find anchor pages: any pool page whose text mentions the schedule
-        ANCHOR_KW = re.compile(
+        # Anchor: pages where "Schedule of Assessments" appears as a HEADING
+        # (i.e. the phrase is prominent, not buried mid-paragraph)
+        SCHED_HEADING = re.compile(
             r'\b(schedule\s+of\s+assessments?|assessment\s+schedule|'
-            r'time\s+and\s+events?|visit\s+schedule|Table\s+\d+(?:[.\-]\d+)?)\b',
+            r'time\s+and\s+events?\s+table|visit\s+schedule)\b',
             re.IGNORECASE
         )
-        anchor_pages: set = set()
-        for c in pool:
-            if ANCHOR_KW.search(c.get("text", "")):
-                anchor_pages.add((c["source"], c["page"]))
+        anchor_pages = sorted(
+            {(c["source"], c["page"]) for c in pool
+             if SCHED_HEADING.search(c.get("text", ""))},
+            key=lambda x: x[1]   # ascending page order
+        )
 
-        # For each anchor, include that page + up to 12 pages forward
-        for (src, page) in anchor_pages:
-            for offset in range(-1, 13):
+        # Take only the first 2 anchors (schedule heading + maybe TOC mention)
+        # and add 8 pages forward from each — enough to capture multi-page tables
+        for src, page in anchor_pages[:2]:
+            for offset in range(-1, 9):
                 key = (src, page + offset)
                 if key in by_src_page and key not in seen_keys:
                     result.append(by_src_page[key])
                     seen_keys.add(key)
 
-        # Additionally pull every chunk that has extracted table data
+        # Add any page with an extracted table (from find_tables / word-position)
         for c in pool:
             key = (c["source"], c["page"])
             if key not in seen_keys and c.get("tables"):
                 result.append(c)
                 seen_keys.add(key)
+
+    # ── Final trim: never send more than 12 chunks to the LLM ───────────────
+    # Prioritise: pages with tables > pages matching schedule keywords > rest
+    if len(result) > 12:
+        SCHED_KW = re.compile(
+            r'\b(schedule|assessment|visit|procedure|endpoint)\b', re.IGNORECASE
+        )
+        def _priority(c):
+            has_table   = 1 if c.get("tables") else 0
+            has_kw      = 1 if SCHED_KW.search(c.get("text", "")) else 0
+            return (has_table * 2 + has_kw, c["page"])
+
+        if TABLE_Q.search(query):
+            result = sorted(result, key=_priority, reverse=True)[:12]
+        else:
+            result = result[:12]
 
     return result
 
