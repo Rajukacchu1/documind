@@ -1196,16 +1196,33 @@ def table_to_html(rows):
 
 
 def render_answer(answer: str, relevant_chunks):
-    """Render answer text (tables stripped out) + images + tables as dataframes."""
-    # Strip markdown tables from the answer text — they are shown as dataframes below
+    """Strip markdown tables from bubble text; collect ALL tables as dataframes."""
     lines = answer.split("\n")
-    non_table_lines = []
+    non_table_lines: list = []
+    _tbl_buf: list = []        # accumulates rows of the current markdown table
+    md_tables: list = []       # parsed tables from LLM markdown output
+
     for line in lines:
         stripped = line.strip()
-        if re.match(r"^\|.*\|$", stripped) or re.match(r"^\|[\s\-|:]+\|$", stripped):
-            continue  # drop table rows and separator lines
-        non_table_lines.append(line)
-    # Collapse consecutive blank lines left behind after table removal
+        is_data_row = bool(re.match(r"^\|.+\|$", stripped)) and not re.match(r"^\|[\s\-|:]+\|$", stripped)
+        is_sep_row  = bool(re.match(r"^\|[\s\-|:]+\|$", stripped))
+        if is_data_row:
+            _tbl_buf.append(stripped)
+        elif is_sep_row:
+            pass  # skip separator, keep buffer open
+        else:
+            if _tbl_buf:
+                rows = [[c.strip() for c in tl.strip("|").split("|")] for tl in _tbl_buf]
+                if len(rows) >= 2:
+                    md_tables.append(rows)
+                _tbl_buf = []
+            non_table_lines.append(line)
+    if _tbl_buf:
+        rows = [[c.strip() for c in tl.strip("|").split("|")] for tl in _tbl_buf]
+        if len(rows) >= 2:
+            md_tables.append(rows)
+
+    # Collapse consecutive blank lines
     cleaned: list[str] = []
     prev_blank = False
     for line in non_table_lines:
@@ -1216,8 +1233,7 @@ def render_answer(answer: str, relevant_chunks):
         prev_blank = is_blank
     answer_html = "<br>".join(cleaned).strip()
 
-    # Collect images — deduplicate by content hash.
-    # An image that appears on more than one page is a repeated logo/header; skip it.
+    # Images — deduplicate; logos appear on every page so skip them
     from collections import Counter
     _img_count: Counter = Counter()
     _img_first: dict = {}
@@ -1228,7 +1244,7 @@ def render_answer(answer: str, relevant_chunks):
                 _img_first[img_b64] = (img_b64, c["source"], c["page"])
     images = [info for b64, info in _img_first.items() if _img_count[b64] == 1]
 
-    # Tables from relevant chunks (deduplicated by source+page)
+    # Tables: chunk-extracted (structured) first, then LLM-generated markdown tables
     seen = set()
     extra_tables = []
     for c in relevant_chunks:
@@ -1237,6 +1253,10 @@ def render_answer(answer: str, relevant_chunks):
             if key not in seen:
                 seen.add(key)
                 extra_tables.append((t, c["source"], c["page"]))
+    # Add LLM markdown tables that have no corresponding chunk-extracted table
+    # (this happens when find_tables() failed but LLM reconstructed from plain text)
+    for rows in md_tables:
+        extra_tables.append((rows, "protocol", 0))
 
     return answer_html, images, extra_tables
 
@@ -1543,7 +1563,21 @@ else:
         from collections import Counter
         pending = st.session_state.pop("_pending_query")
         relevant = retrieve(pending, st.session_state.doc_chunks, st.session_state.embeddings, top_k=8)
-        context  = build_context(relevant)
+
+        # ── Hard document filter ──────────────────────────────────────────────
+        # Re-run _doc_filter to find which documents the query refers to.
+        # If specific documents were identified, remove any chunks from other docs
+        # that may have crept in via table expansion or semantic search.
+        _filter_pool, _ = _doc_filter(pending, st.session_state.doc_chunks)
+        _matched_srcs = {c["source"] for c in _filter_pool}
+        _all_srcs     = {c["source"] for c in st.session_state.doc_chunks}
+        if _matched_srcs != _all_srcs:
+            # A specific document was identified → enforce strictly
+            relevant = [c for c in relevant if c["source"] in _matched_srcs]
+            if not relevant:
+                relevant = _filter_pool[:8]  # fallback if over-filtered
+
+        context = build_context(relevant)
 
         # ── Image classification (table / relevant / irrelevant) ─────────────
         api_key = st.session_state.get("anthropic_api_key", "") or os.environ.get("ANTHROPIC_API_KEY", "")
