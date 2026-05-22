@@ -1961,30 +1961,33 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
             with col_btn:
                 submit = st.form_submit_button("Send ➤", use_container_width=True)
 
-        # Step 1 — user hits Send: show message immediately, queue the query
-        if submit and query.strip():
-            st.session_state.messages.append({"role": "user", "content": query.strip()})
-            st.session_state["_pending_query"] = query.strip()
-            st.rerun()
-
-        # ── Prompt utility bar: Copy last Q + Reload last Q ───────────────────
+        # ── Utility bar — always just below the prompt ────────────────────────
         _last_user_q = next(
             (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "user"),
             ""
         )
-        if _last_user_q:
-            _util_col1, _util_col2, _util_rest = st.columns([1, 1, 8])
-            with _util_col1:
-                if st.button("📋 Copy Q", key="copy_last_q", use_container_width=True):
-                    st.session_state["_show_copy_q"] = not st.session_state.get("_show_copy_q", False)
-            with _util_col2:
-                if st.button("🔄 Reload Q", key="reload_last_q", use_container_width=True,
-                             help="Re-ask the last question"):
-                    st.session_state["_pending_query"] = _last_user_q
-                    st.rerun()
-            # Show copyable text when toggled — st.code has a built-in copy icon
-            if st.session_state.get("_show_copy_q"):
-                st.code(_last_user_q, language=None)
+        _util_col1, _util_col2, _util_rest = st.columns([1, 1, 8])
+        with _util_col1:
+            if st.button("📋 Copy Q", key="copy_last_q",
+                         use_container_width=True,
+                         disabled=not bool(_last_user_q)):
+                st.session_state["_show_copy_q"] = not st.session_state.get("_show_copy_q", False)
+        with _util_col2:
+            if st.button("🔄 Reload Q", key="reload_last_q",
+                         use_container_width=True,
+                         disabled=not bool(_last_user_q),
+                         help="Re-ask the last question"):
+                st.session_state["_pending_query"] = _last_user_q
+                st.rerun()
+        if st.session_state.get("_show_copy_q") and _last_user_q:
+            st.code(_last_user_q, language=None)
+
+        # Step 1 — user hits Send: show message immediately, queue the query
+        if submit and query.strip():
+            st.session_state["_show_copy_q"] = False   # close any open copy block
+            st.session_state.messages.append({"role": "user", "content": query.strip()})
+            st.session_state["_pending_query"] = query.strip()
+            st.rerun()
 
     # Process pending query (only runs when _pending_query is still set after the
     # Stop button check above — i.e., user did not click Stop on this rerun)
