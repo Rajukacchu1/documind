@@ -1176,17 +1176,35 @@ _CDISC_DOMAINS = frozenset({
     "RS", "MI", "NV", "OE", "HR", "CE", "ML", "BE", "BW",
 })
 
+
+def _detect_domain(query: str) -> str | None:
+    """Return the first CDISC domain code found as a whole word in the query."""
+    q_upper = query.upper()
+    for d in _CDISC_DOMAINS:
+        if re.search(r'\b' + re.escape(d) + r'\b', q_upper):
+            return d
+    return None
+
+
+def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
+    """
+    Keep only the header row plus data rows that contain the domain code in any cell.
+    Returns the original rows unchanged when no domain rows are found.
+    """
+    if not rows or len(rows) < 2:
+        return rows
+    dom_re = re.compile(r'\b' + re.escape(domain) + r'\b', re.IGNORECASE)
+    header = rows[0]
+    matched = [r for r in rows[1:] if any(dom_re.search(str(cell)) for cell in r)]
+    return [header] + matched if matched else rows
+
+
 def _domain_filter(query: str, chunks: list):
     """
     If the query names a CDISC domain, return only chunks containing that domain.
     Returns None when no domain is detected (caller keeps original list).
     """
-    q_upper = query.upper()
-    matched_domain = None
-    for d in _CDISC_DOMAINS:
-        if re.search(r'\b' + re.escape(d) + r'\b', q_upper):
-            matched_domain = d
-            break
+    matched_domain = _detect_domain(query)
     if not matched_domain:
         return None
     dom_re = re.compile(r'\b' + re.escape(matched_domain) + r'\b')
@@ -1508,12 +1526,7 @@ def ask_llm(query: str, context: str, vision_images: list = None, table_query: b
         )
     else:
         # ── Detect CDISC domain in query for hard domain filter ───────────────
-        _q_upper = query.upper()
-        _detected_domain = None
-        for _d in _CDISC_DOMAINS:
-            if re.search(r'\b' + re.escape(_d) + r'\b', _q_upper):
-                _detected_domain = _d
-                break
+        _detected_domain = _detect_domain(query)
 
         _domain_rule = ""
         _domain_instr = ""
@@ -2168,6 +2181,7 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
         # ── Domain filter (DM, VS, AE, etc.) ─────────────────────────────────
         # When user asks for a specific CDISC domain, keep only chunks that
         # mention that domain — prevents returning all domains from the file.
+        _query_domain = _detect_domain(pending)   # used for table-row filter below
         _domain_result = _domain_filter(pending, relevant)
         if _domain_result is not None:
             relevant = _domain_result or relevant
@@ -2247,9 +2261,17 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
 
                 # ── Structured table (Method 1 / find_tables) → dataframe ──
                 for t in c.get("tables", []):
-                    if page_key not in seen_pages and _is_quality_table(t):
+                    if not _is_quality_table(t):
+                        continue
+                    # When a specific CDISC domain is requested, keep only rows
+                    # for that domain — prevents showing the full multi-domain table.
+                    if _query_domain:
+                        t = _filter_table_rows_by_domain(t, _query_domain)
+                        if len(t) < 2:   # header only → no matching rows, skip
+                            continue
+                    if page_key not in seen_pages:
                         seen_pages.add(page_key)
-                        direct_tables.append((t, src, pg))
+                    direct_tables.append((t, src, pg))
 
                 # ── No structured table → page image only for table/figure queries ──
                 # For plain-text sections (e.g. eCRF completion text), show the text
@@ -2282,6 +2304,21 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                     if c.get("text", "").strip():
                         seen_pages.add(page_key)
                         direct_texts.append((c["text"].strip(), src, pg))
+
+            # When a domain was requested, merge all filtered tables into one
+            # so the user sees a single combined table instead of many small ones.
+            if _query_domain and len(direct_tables) > 1:
+                _merged_header = direct_tables[0][0][0]   # header row from first table
+                _merged_rows = []
+                _seen_row_keys: set = set()
+                for _dt, _ds, _dp in direct_tables:
+                    for _row in _dt[1:]:   # skip header of each table
+                        _key = tuple(str(c).strip() for c in _row)
+                        if _key not in _seen_row_keys:
+                            _merged_rows.append(_row)
+                            _seen_row_keys.add(_key)
+                if _merged_rows:
+                    direct_tables = [([_merged_header] + _merged_rows, direct_tables[0][1], direct_tables[0][2])]
 
             # Build the answer bubble — minimal heading + source info only
             top_heading = ""
