@@ -354,16 +354,21 @@ html, body { background-color: var(--bg) !important; }
     background: var(--surface3) !important;
     box-shadow: 0 0 0 4px rgba(157,111,255,.15), 0 4px 20px rgba(157,111,255,.12) !important;
 }
-/* Text area inside */
-[data-testid="stChatInputTextArea"] {
+/* Text area inside — explicit color so typed text is visible on dark bg */
+[data-testid="stChatInputTextArea"],
+[data-testid="stChatInput"] textarea,
+[data-testid="stChatInput"] input {
     background: transparent !important;
-    color: var(--text) !important;
-    caret-color: var(--violet) !important;
+    color: #f0eeff !important;
+    -webkit-text-fill-color: #f0eeff !important;
+    caret-color: #9d6fff !important;
     font-family: 'Inter', sans-serif !important;
     font-size: 0.95rem !important;
 }
-[data-testid="stChatInputTextArea"]::placeholder {
-    color: var(--text-dim) !important;
+[data-testid="stChatInputTextArea"]::placeholder,
+[data-testid="stChatInput"] textarea::placeholder {
+    color: #6060a0 !important;
+    -webkit-text-fill-color: #6060a0 !important;
     opacity: 1 !important;
 }
 /* Send button — gold gradient matching old Send ➤ button */
