@@ -767,6 +767,20 @@ def _is_quality_table(rows: list) -> bool:
     if x_count >= 4:
         return True
 
+    # Reject document-header metadata tables (Protocol No., Version, Date repeated rows)
+    meta_rows = sum(
+        1 for r in rows
+        if r and all(not str(c).strip() or _HEADING_SKIP.search(str(c)) for c in r)
+    )
+    if meta_rows >= max(1, len(rows) - 1):
+        return False
+
+    # Reject page-index / table-of-contents tables
+    _TOC_CELL = re.compile(r'^\s*(page\s+\d+|\d+\s*$|p\.\s*\d+)\s*$', re.IGNORECASE)
+    toc_cells = sum(1 for c in cells if _TOC_CELL.match(str(c)))
+    if toc_cells >= 3:
+        return False
+
     # Path 2 — structural table: consistent column width + multi-word cells
     avg_cols = sum(col_counts) / len(col_counts)
     col_spread = max(col_counts) - min(col_counts)
@@ -2059,7 +2073,22 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                         st.session_state["_retry_mode"]    = True
                         st.rerun()
 
-    # Thinking indicator + Stop button — shown while query is pending
+    # Cancel button — visible in chat area while processing
+    if st.session_state.get("_pending_query"):
+        _cc, _ = st.columns([2, 8])
+        with _cc:
+            st.markdown(
+                '<div style="font-size:.8rem;color:#c8c5ff;padding:2px 0 4px;">⏳ Searching documents…</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("⏹ Cancel Query", key="stop_btn", use_container_width=True,
+                         help="Cancel this query"):
+                st.session_state.pop("_pending_query", None)
+                st.session_state.pop("_processing", None)
+                st.toast("Query cancelled.", icon="🛑")
+                st.rerun()
+
+    # Thinking indicator — shown while query is pending
     thinking_slot = st.empty()
     if st.session_state.get("_pending_query"):
         thinking_slot.markdown("""
@@ -2075,51 +2104,53 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Auto-scroll
+    # Auto-scroll — scroll main Streamlit container to bottom on every rerun
     st.markdown("""
     <script>
     (function() {
         function scrollToBottom() {
-            var chatWrap = document.querySelector('.chat-wrap');
-            if (chatWrap) chatWrap.scrollIntoView({ behavior: 'smooth', block: 'end' });
-            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+            // Streamlit renders inside [data-testid="stMain"] > div > div
+            var targets = [
+                document.querySelector('[data-testid="stMain"]'),
+                document.querySelector('.main'),
+                document.querySelector('.block-container'),
+                document.documentElement,
+                document.body
+            ];
+            for (var i = 0; i < targets.length; i++) {
+                if (targets[i]) {
+                    targets[i].scrollTop = targets[i].scrollHeight;
+                }
+            }
+            window.scrollTo(0, document.body.scrollHeight);
         }
-        setTimeout(scrollToBottom, 150);
+        // Run immediately and again after DOM settles
+        scrollToBottom();
+        setTimeout(scrollToBottom, 100);
+        setTimeout(scrollToBottom, 350);
     })();
     </script>
     """, unsafe_allow_html=True)
 
-    # ── Query form (sticky to bottom) OR stop button while processing ─────────
-    if st.session_state.get("_pending_query"):
-        _sc, _ = st.columns([2, 8])
-        with _sc:
-            st.markdown(
-                '<div style="font-size:.8rem;color:#c8c5ff;padding:2px 0 4px;">⏳ Searching documents…</div>',
-                unsafe_allow_html=True,
+    # ── Query form (always rendered at bottom) ────────────────────────────────
+    _is_processing = bool(st.session_state.get("_pending_query"))
+    with st.form(key="query_form", clear_on_submit=True):
+        col_in, col_btn = st.columns([5, 1])
+        with col_in:
+            query = st.text_input(
+                "Ask a question",
+                placeholder="⏳ Processing…" if _is_processing else "What does the document say about…?",
+                label_visibility="collapsed",
+                disabled=_is_processing,
             )
-            if st.button("⏹ Stop", key="stop_btn", use_container_width=True,
-                         help="Cancel this query"):
-                st.session_state.pop("_pending_query", None)
-                st.session_state.pop("_processing", None)
-                st.toast("Query cancelled.", icon="🛑")
-                st.rerun()
-    else:
-        with st.form(key="query_form", clear_on_submit=True):
-            col_in, col_btn = st.columns([5, 1])
-            with col_in:
-                query = st.text_input(
-                    "Ask a question",
-                    placeholder="What does the document say about…?",
-                    label_visibility="collapsed",
-                )
-            with col_btn:
-                submit = st.form_submit_button("Send ➤", use_container_width=True)
+        with col_btn:
+            submit = st.form_submit_button("Send ➤", use_container_width=True, disabled=_is_processing)
 
-        if submit and query.strip():
-            st.session_state.messages.append({"role": "user", "content": query.strip()})
-            st.session_state["_pending_query"] = query.strip()
-            st.session_state.pop("_awaiting_feedback", None)
-            st.rerun()
+    if submit and query.strip() and not _is_processing:
+        st.session_state.messages.append({"role": "user", "content": query.strip()})
+        st.session_state["_pending_query"] = query.strip()
+        st.session_state.pop("_awaiting_feedback", None)
+        st.rerun()
 
     # Process pending query (only runs when _pending_query is still set after the
     # Stop button check above — i.e., user did not click Stop on this rerun)
@@ -2266,30 +2297,44 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                 # For plain-text sections (e.g. eCRF completion text), show the text
                 # instead of rendering a page image that includes the document header.
                 _FIGURE_RE = re.compile(r'\bFigure\s+\d', re.IGNORECASE)
-                _needs_img = _is_table_q or _FIGURE_RE.search(c.get("text", ""))
+                _has_fig_ref = bool(_FIGURE_RE.search(c.get("text", "")))
+                _needs_img = _is_table_q or _has_fig_ref
                 if _needs_img and page_key not in seen_pages and src.lower().endswith(".pdf"):
                     hint = c.get("heading", "") or pending
                     img_b64 = get_table_image(src, pg, heading_hint=hint)
                     if img_b64:
                         seen_pages.add(page_key)
                         direct_images.append((img_b64, src, pg))
+                # Figure reference found → also render the NEXT page (figure usually
+                # appears on the page after the text that cites it)
+                if _has_fig_ref and src.lower().endswith(".pdf"):
+                    _next_key = (src, pg + 1)
+                    if _next_key not in seen_pages:
+                        _nxt_img = get_table_image(src, pg + 1, heading_hint="Figure")
+                        if _nxt_img:
+                            seen_pages.add(_next_key)
+                            direct_images.append((_nxt_img, src, pg + 1))
 
                 # ── Embedded images in the document ──
-                for b64 in c.get("images", []):
-                    if b64 not in seen_img:
-                        seen_img.add(b64)
-                        if api_key and ANTHROPIC_OK:
-                            kind, rows = analyze_image(b64, pending, api_key)
-                            if kind == "table" and rows and _is_quality_table(rows):
-                                direct_tables.append((rows, src, pg))
-                            elif kind == "relevant":
+                # Only shown for table/figure queries; for text-guideline queries
+                # the embedded form screenshots are supplementary noise.
+                if _is_table_q:
+                    for b64 in c.get("images", []):
+                        if b64 not in seen_img:
+                            seen_img.add(b64)
+                            if api_key and ANTHROPIC_OK:
+                                kind, rows = analyze_image(b64, pending, api_key)
+                                if kind == "table" and rows and _is_quality_table(rows):
+                                    direct_tables.append((rows, src, pg))
+                                elif kind == "relevant":
+                                    direct_images.append((b64, src, pg))
+                            else:
                                 direct_images.append((b64, src, pg))
-                        else:
-                            direct_images.append((b64, src, pg))
 
                 # ── Text sections (PDF and non-PDF) ──
-                # Show verbatim text when no structured table was found for this page.
-                if page_key not in seen_pages and not c.get("tables"):
+                # Show text when no quality table has claimed this page.
+                # (seen_pages is only updated by quality tables and page images)
+                if page_key not in seen_pages:
                     if c.get("text", "").strip():
                         seen_pages.add(page_key)
                         direct_texts.append((c["text"].strip(), src, pg))
@@ -2372,6 +2417,20 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                             vision_images.append((b64, src, page))
             else:
                 display_images = _uniq_imgs
+
+            # Render page images for any "Figure N" references found in retrieved text
+            _FIGURE_RE_LLM = re.compile(r'\bFigure\s+\d', re.IGNORECASE)
+            _fig_seen_pg: set = {(b, s, p) for b, s, p in display_images}
+            _fig_seen_keys: set = set()
+            for _fc in relevant:
+                if _FIGURE_RE_LLM.search(_fc.get("text", "")) and _fc["source"].lower().endswith(".pdf"):
+                    for _offset in (0, 1):   # render the citing page AND the next page
+                        _fk = (_fc["source"], _fc["page"] + _offset)
+                        if _fk not in _fig_seen_keys:
+                            _fig_seen_keys.add(_fk)
+                            _fi = get_table_image(_fc["source"], _fc["page"] + _offset, heading_hint="Figure")
+                            if _fi and _fi not in {b for b, _, _ in display_images}:
+                                display_images.append((_fi, _fc["source"], _fc["page"] + _offset))
 
             raw_answer = ask_llm(pending, context, vision_images=vision_images,
                                  table_query=_is_table_q)
