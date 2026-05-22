@@ -771,15 +771,29 @@ def _is_quality_table(rows: list) -> bool:
 
 
 # ── Heading helpers ───────────────────────────────────────────────────────────
+
+# Lines that are document-level page headers (repeated on every page in eCRF,
+# protocol cover sheets, etc.) — skip when extracting the section heading.
+_HEADING_SKIP = re.compile(
+    r'protocol\s*(no\.?|number)|document\s+version|e-?\s*crf\s*(completion|guidelines?)?'
+    r'|version\s+number|\bdate\s*:|\bsponsor\b|study\s+code|site\s+no'
+    r'|completion\s+guide|guidelines?\s*$|form\s+version'
+    r'|page\s+\d+\s+of\s+\d+|^\s*\d+\s+of\s+\d+\s*$',
+    re.IGNORECASE,
+)
+
+
 def _extract_heading(text: str) -> str:
-    """Return the first short line that looks like a section heading."""
+    """Return the first short line that looks like a section heading,
+    skipping repeated document-level header lines (e.g. eCRF page headers)."""
     for line in text.splitlines():
         line = line.strip()
         if (line
                 and 4 <= len(line) <= 120
                 and not line.endswith('.')
                 and not re.match(r'^\d+$', line)
-                and not re.match(r'^page\s*\d+$', line, re.I)):
+                and not re.match(r'^page\s*\d+$', line, re.I)
+                and not _HEADING_SKIP.search(line)):
             return line
     return ""
 
@@ -811,6 +825,20 @@ def _heading_match(query: str, heading: str) -> int:
     if count >= 1 and len(h) == 1:
         return 2
     return count
+
+
+def _text_heading_match(query: str, text: str) -> int:
+    """Scan the first 15 lines of page text for a section heading that matches
+    the query. Used as a fallback when _extract_heading() returned a generic
+    document-level title instead of the actual section heading."""
+    best = 0
+    for line in text.splitlines()[:15]:
+        line = line.strip()
+        if 3 <= len(line) <= 80 and not line.endswith('.') and not _HEADING_SKIP.search(line):
+            score = _heading_match(query, line)
+            if score > best:
+                best = score
+    return best
 
 
 def get_table_image(filename: str, page_num: int, heading_hint: str = "") -> str | None:
@@ -1126,6 +1154,36 @@ def _doc_filter(query: str, all_chunks: list) -> tuple:
     return pool, indices
 
 
+# ── CDISC domain filter ───────────────────────────────────────────────────────
+# When the query explicitly names a domain (e.g. "DM domain", "VS domain"),
+# keep only chunks that specifically discuss that domain.
+_CDISC_DOMAINS = frozenset({
+    "DM", "AE", "VS", "LB", "CM", "EX", "DS", "MH", "SU", "EG", "PE", "SC",
+    "RP", "FA", "PC", "PP", "DV", "QS", "PR", "DD", "IE", "SV", "TU", "TR",
+    "RS", "MI", "NV", "OE", "HR", "CE", "ML", "BE", "BW",
+})
+
+def _domain_filter(query: str, chunks: list):
+    """
+    If the query names a CDISC domain, return only chunks containing that domain.
+    Returns None when no domain is detected (caller keeps original list).
+    """
+    q_upper = query.upper()
+    matched_domain = None
+    for d in _CDISC_DOMAINS:
+        if re.search(r'\b' + re.escape(d) + r'\b', q_upper):
+            matched_domain = d
+            break
+    if not matched_domain:
+        return None
+    dom_re = re.compile(r'\b' + re.escape(matched_domain) + r'\b')
+    hits = [
+        c for c in chunks
+        if dom_re.search(c.get("text", "")) or dom_re.search(c.get("heading", ""))
+    ]
+    return hits if hits else None
+
+
 def _expand_table_refs(retrieved: list, pool: list) -> list:
     """
     Expand retrieved chunks with adjacent pages when table-related content is referenced.
@@ -1250,11 +1308,20 @@ def retrieve(query: str, chunks, embeddings, top_k=5):
     # the query (e.g. "9.4.2 Statistical model, hypothesis, and method of analysis").
     # Semantic search may miss the actual section page if it's outranked by pages
     # that scatter the same keywords throughout body text.
+    # Uses both _heading_match (on extracted heading) and _text_heading_match
+    # (scans first 15 lines) so pages with repeated document headers (eCRF etc.)
+    # are still found even if _extract_heading returned the wrong line.
     _seen_hm  = {(c["source"], c["page"]) for c in result}
     _by_sp    = {(c["source"], c["page"]): c for c in pool}
-    _hm_hits  = sorted(
-        [(c, _heading_match(query, c.get("heading", ""))) for c in pool
-         if _heading_match(query, c.get("heading", "")) >= 2],
+
+    def _best_hmatch(c):
+        return max(
+            _heading_match(query, c.get("heading", "")),
+            _text_heading_match(query, c.get("text", "")),
+        )
+
+    _hm_hits = sorted(
+        [(c, _best_hmatch(c)) for c in pool if _best_hmatch(c) >= 2],
         key=lambda x: -x[1]
     )
     for _hm_c, _ in _hm_hits[:3]:
@@ -1625,9 +1692,11 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
     else:
+        _default_folder = st.secrets.get("DOCS_FOLDER", r"C:\Users\User\OneDrive\Desktop\Study Guide\docs")
         folder_path = st.text_input(
             "Or enter a folder path",
             placeholder="C:/path/to/your/documents",
+            value=_default_folder,
         )
 
     col1, col2 = st.columns(2)
@@ -1752,12 +1821,18 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown('<span style="font-size:.75rem;color:var(--text-muted);letter-spacing:.04em;text-transform:uppercase;">API Key</span>', unsafe_allow_html=True)
+    # Load API key: sidebar input > session state > env var > Streamlit secrets
+    _default_key = (
+        st.session_state.get("anthropic_api_key", "")
+        or os.environ.get("ANTHROPIC_API_KEY", "")
+        or st.secrets.get("ANTHROPIC_API_KEY", "")
+    )
     api_key_input = st.text_input(
         "Anthropic API Key",
         type="password",
         placeholder="sk-ant-…",
         label_visibility="collapsed",
-        value=st.session_state.get("anthropic_api_key", os.environ.get("ANTHROPIC_API_KEY", "")),
+        value=_default_key,
     )
     if api_key_input:
         st.session_state["anthropic_api_key"] = api_key_input
@@ -1826,6 +1901,7 @@ else:
                     st.rerun()
                 st.markdown('</div>', unsafe_allow_html=True)
             if st.session_state.get(f"_show_copy_q_{_msg_idx}"):
+                st.caption("Your question — click the copy icon to copy:")
                 st.code(_q_text, language=None)
         else:
             answer_html = msg.get("answer_html", msg["content"])
@@ -1842,7 +1918,8 @@ else:
             """, unsafe_allow_html=True)
 
             # Copy answer — st.expander shows the text with Streamlit's built-in copy icon
-            with st.expander("📋 Copy Answer"):
+            with st.expander("📋 Copy Answer Text"):
+                st.caption("Answer text — click the copy icon to copy:")
                 st.code(msg.get("content", ""), language=None)
 
             # Inline images (page renders + classified doc images)
@@ -1901,13 +1978,13 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
 </style>""", unsafe_allow_html=True)
                 st.markdown(
                     '<div style="display:flex;align-items:center;gap:10px;'
-                    'margin:6px 0 6px 0;font-size:.85rem;color:#1e1b4b;font-weight:700;">'
-                    '🤔 Is this information correct?</div>',
+                    'margin:6px 0 6px 0;font-size:.85rem;color:#f0eeff;font-weight:700;">'
+                    'Is this information correct?</div>',
                     unsafe_allow_html=True,
                 )
                 _fb_col1, _fb_col2, _fb_col3, _ = st.columns([1, 1.4, 1, 4.6])
                 with _fb_col1:
-                    if st.button("✅ Yes", key="fb_yes", use_container_width=True):
+                    if st.button("Yes", key="fb_yes", use_container_width=True):
                         _fq = st.session_state.pop("_feedback_query", "")
                         st.session_state.learned_answers.append({
                             "query":   _fq,
@@ -1918,7 +1995,7 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                         st.toast("Saved! I'll use this answer for similar questions.", icon="✅")
                         st.rerun()
                 with _fb_col2:
-                    if st.button("⚠️ Partially", key="fb_partial", use_container_width=True):
+                    if st.button("Partially", key="fb_partial", use_container_width=True):
                         # Do NOT permanently save — just retry for a more complete answer.
                         # Only "Yes" persists to disk.
                         _fq = st.session_state.pop("_feedback_query", "")
@@ -1930,7 +2007,7 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                         st.toast("Looking for more complete information…", icon="🔍")
                         st.rerun()
                 with _fb_col3:
-                    if st.button("❌ No", key="fb_no", use_container_width=True):
+                    if st.button("No", key="fb_no", use_container_width=True):
                         _fq = st.session_state.pop("_feedback_query", "")
                         st.session_state.pop("_awaiting_feedback", None)
                         if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
@@ -1969,61 +2046,31 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
     </script>
     """, unsafe_allow_html=True)
 
-    # ── Input row: Send form OR Stop button ─────────────────────────────────
-    st.markdown("<br>", unsafe_allow_html=True)
-
+    # ── Stop button (shown while a query is processing) ──────────────────────
     if st.session_state.get("_pending_query"):
-        # While processing: show Stop button instead of the Send form.
-        # Inject CSS here (not in global block) so it only targets the one button
-        # visible at this moment — the send form is hidden, so no false matches.
-        st.markdown("""
-        <style>
-        .stop-row { display:flex; align-items:center; gap:12px; padding:8px 0; }
-        .stop-hint { font-size:.8rem; color:#1e1b4b; font-family:'Inter',sans-serif; font-weight:600; }
-        /* Stop button — solid so it's visible on any background */
-        button[data-testid="baseButton-secondary"] {
-            background: #7c3aed !important;
-            border: none !important;
-            color: #ffffff !important;
-            border-radius: 8px !important;
-            font-weight: 700 !important;
-            font-size: .88rem !important;
-            padding: 7px 22px !important;
-            min-width: 110px !important;
-            transition: background .2s, box-shadow .2s !important;
-        }
-        button[data-testid="baseButton-secondary"]:hover {
-            background: #6d28d9 !important;
-            box-shadow: 0 0 12px rgba(109,40,217,.5) !important;
-        }
-        </style>
-        <div class="stop-row">
-            <span class="stop-hint">⏳ Searching documents…</span>
-        </div>
-        """, unsafe_allow_html=True)
-        if st.button("⏹ Stop", key="stop_btn", use_container_width=False,
-                     help="Cancel this query"):
-            st.session_state.pop("_pending_query", None)
-            st.session_state.pop("_processing", None)
-            st.toast("Query cancelled.", icon="🛑")
-            st.rerun()
-    else:
-        with st.form(key="query_form", clear_on_submit=True):
-            col_in, col_btn = st.columns([5, 1])
-            with col_in:
-                query = st.text_input(
-                    "Ask a question",
-                    placeholder="What does the document say about…?",
-                    label_visibility="collapsed",
-                )
-            with col_btn:
-                submit = st.form_submit_button("Send ➤", use_container_width=True)
+        _sc, _ = st.columns([2, 8])
+        with _sc:
+            st.markdown(
+                '<div style="font-size:.8rem;color:#c8c5ff;padding:2px 0 4px;">⏳ Searching documents…</div>',
+                unsafe_allow_html=True,
+            )
+            if st.button("⏹ Stop", key="stop_btn", use_container_width=True,
+                         help="Cancel this query"):
+                st.session_state.pop("_pending_query", None)
+                st.session_state.pop("_processing", None)
+                st.toast("Query cancelled.", icon="🛑")
+                st.rerun()
 
-        # Step 1 — user hits Send: show message immediately, queue the query
-        if submit and query.strip():
-            st.session_state.messages.append({"role": "user", "content": query.strip()})
-            st.session_state["_pending_query"] = query.strip()
-            st.rerun()
+    # ── Chat input — always pinned to the bottom of the viewport ─────────────
+    _query_input = st.chat_input(
+        "Ask a question about your documents…",
+        disabled=bool(st.session_state.get("_pending_query")),
+    )
+    if _query_input and _query_input.strip():
+        st.session_state.messages.append({"role": "user", "content": _query_input.strip()})
+        st.session_state["_pending_query"] = _query_input.strip()
+        st.session_state.pop("_awaiting_feedback", None)
+        st.rerun()
 
     # Process pending query (only runs when _pending_query is still set after the
     # Stop button check above — i.e., user did not click Stop on this rerun)
@@ -2071,6 +2118,13 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
             if not relevant:
                 relevant = _filter_pool[:8]  # fallback if over-filtered
 
+        # ── Domain filter (DM, VS, AE, etc.) ─────────────────────────────────
+        # When user asks for a specific CDISC domain, keep only chunks that
+        # mention that domain — prevents returning all domains from the file.
+        _domain_result = _domain_filter(pending, relevant)
+        if _domain_result is not None:
+            relevant = _domain_result or relevant
+
         context = build_context(relevant)
 
         # ── Image classification (table / relevant / irrelevant) ─────────────
@@ -2090,8 +2144,13 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                     _seen_b64.add(b64)
 
         # ── Score each chunk by heading match ────────────────────────────────
+        # Use max of extracted-heading score and text-scan score so eCRF-style
+        # pages with repeated document headers are still found correctly.
         for c in relevant:
-            c["_hscore"] = _heading_match(pending, c.get("heading", ""))
+            c["_hscore"] = max(
+                _heading_match(pending, c.get("heading", "")),
+                _text_heading_match(pending, c.get("text", "")),
+            )
         best_hscore = max((c["_hscore"] for c in relevant), default=0)
 
         # ── Route: direct render (structure-preserving) vs LLM ───────────────
@@ -2145,8 +2204,12 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                         seen_pages.add(page_key)
                         direct_tables.append((t, src, pg))
 
-                # ── No structured table → render just the table/section area ──
-                if page_key not in seen_pages and src.lower().endswith(".pdf"):
+                # ── No structured table → page image only for table/figure queries ──
+                # For plain-text sections (e.g. eCRF completion text), show the text
+                # instead of rendering a page image that includes the document header.
+                _FIGURE_RE = re.compile(r'\bFigure\s+\d', re.IGNORECASE)
+                _needs_img = _is_table_q or _FIGURE_RE.search(c.get("text", ""))
+                if _needs_img and page_key not in seen_pages and src.lower().endswith(".pdf"):
                     hint = c.get("heading", "") or pending
                     img_b64 = get_table_image(src, pg, heading_hint=hint)
                     if img_b64:
@@ -2166,7 +2229,8 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                         else:
                             direct_images.append((b64, src, pg))
 
-                # ── Text sections (non-PDF or non-table chunks) ──
+                # ── Text sections (PDF and non-PDF) ──
+                # Show verbatim text when no structured table was found for this page.
                 if page_key not in seen_pages and not c.get("tables"):
                     if c.get("text", "").strip():
                         seen_pages.add(page_key)
@@ -2191,9 +2255,17 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
 
             thinking_slot.empty()
             sources = list({f"{c['source']} p.{c['page']}" for c in render_chunks})
+            # Build copyable plain-text version: heading + any text sections + sources
+            _copy_content = top_heading
+            if direct_texts:
+                _copy_content += "\n\n" + "\n\n".join(
+                    f"{txt}\n[{src}, Page {pg}]" for txt, src, pg in direct_texts
+                )
+            else:
+                _copy_content += "\n\n" + "\n".join(f"[{s}]" for s in sources)
             st.session_state.messages.append({
                 "role": "assistant",
-                "content": top_heading,
+                "content": _copy_content,
                 "answer_html": answer_html,
                 "images": direct_images,
                 "tables": direct_tables,
