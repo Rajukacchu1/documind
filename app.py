@@ -1504,6 +1504,32 @@ def ask_llm(query: str, context: str, vision_images: list = None, table_query: b
             "No other tables. No surrounding text."
         )
     else:
+        # ── Detect CDISC domain in query for hard domain filter ───────────────
+        _q_upper = query.upper()
+        _detected_domain = None
+        for _d in _CDISC_DOMAINS:
+            if re.search(r'\b' + re.escape(_d) + r'\b', _q_upper):
+                _detected_domain = _d
+                break
+
+        _domain_rule = ""
+        _domain_instr = ""
+        if _detected_domain:
+            _domain_rule = (
+                f"\nDOMAIN FILTER (critical):\n"
+                f"- The user is asking specifically about the **{_detected_domain}** domain.\n"
+                f"- Output ONLY the edit checks / rules / fields / information that belong to "
+                f"  the {_detected_domain} domain section.\n"
+                f"- COMPLETELY IGNORE edit checks or information for any other domain "
+                f"  (AE, VS, LB, CM, DM, EX, DS, MH, etc.) even if they appear in the context.\n"
+                f"- If the {_detected_domain} domain section is not found, say: "
+                f"  'No {_detected_domain} domain information found in the document.'\n"
+            )
+            _domain_instr = (
+                f" Output ONLY the {_detected_domain} domain section — "
+                f"skip every other domain completely."
+            )
+
         system = (
             "You are a precise document extraction assistant. Return exact content — never paraphrase.\n\n"
             "DOCUMENT RULES (most important):\n"
@@ -1513,7 +1539,8 @@ def ask_llm(query: str, context: str, vision_images: list = None, table_query: b
             "- If the requested information is not found in the specified document, say exactly: "
             "  'This information is not available in [document name].'\n"
             "- NEVER pull information from a different document to fill gaps.\n\n"
-            "TOPIC FOCUS:\n"
+            + _domain_rule +
+            "\nTOPIC FOCUS:\n"
             "- Answer ONLY the specific topic asked. Do NOT reproduce surrounding paragraphs, "
             "  unrelated sections, or the full document text.\n"
             "- Extract the minimum content that directly answers the question.\n"
@@ -1536,6 +1563,7 @@ def ask_llm(query: str, context: str, vision_images: list = None, table_query: b
             "Extract ONLY the content about the specific topic asked, "
             "from the correct source document only. "
             "Reproduce tables in full as markdown tables."
+            + _domain_instr
         )
 
     # Build message content — include vision images so Claude can read them
