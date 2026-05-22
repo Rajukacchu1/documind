@@ -480,6 +480,24 @@ hr { border-color: var(--border2) !important; }
     40%            { transform: scale(1.2); opacity: 1; }
 }
 
+/* ── Message action buttons (📋 📋 Copy, 🔄 Reload) — compact rectangles ── */
+button[data-testid="baseButton-secondary"] {
+    padding: 2px 8px !important;
+    min-height: 30px !important;
+    height: 30px !important;
+    font-size: .8rem !important;
+    border-radius: 5px !important;
+    background: rgba(100,70,220,.12) !important;
+    border: 1px solid rgba(136,102,255,.40) !important;
+    color: #000 !important;
+    line-height: 1 !important;
+    white-space: nowrap !important;
+}
+button[data-testid="baseButton-secondary"]:hover {
+    background: rgba(100,70,220,.26) !important;
+    border-color: #8866ff !important;
+}
+
 /* ── Stop button — styled via dynamic injection in Python, not here ── */
 
 /* ── Hide Streamlit chrome ── */
@@ -1778,19 +1796,34 @@ else:
     for _msg_idx, msg in enumerate(st.session_state.messages):
         _is_last = _msg_idx == len(st.session_state.messages) - 1
         if msg["role"] == "user":
-            st.markdown(f'<div class="msg-user"><div class="bubble">{msg["content"]}</div></div>', unsafe_allow_html=True)
-            # Copy / Reload buttons just below the user query
             _q_text = msg["content"]
-            _qc1, _qc2, _ = st.columns([0.6, 0.7, 8.7])
-            with _qc1:
-                if st.button("📋 Copy", key=f"copy_q_{_msg_idx}", use_container_width=True):
+            # Bubble + action buttons on the same row (bubble wide, buttons narrow right)
+            _qbubble_col, _qcopy_col, _qreload_col = st.columns([9.0, 0.5, 0.5])
+            with _qbubble_col:
+                st.markdown(
+                    f'<div class="msg-user"><div class="bubble">{_q_text}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with _qcopy_col:
+                st.markdown(
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding-top:6px;">',
+                    unsafe_allow_html=True,
+                )
+                if st.button("📋", key=f"copy_q_{_msg_idx}",
+                             use_container_width=True, help="Copy question"):
                     _ck = f"_show_copy_q_{_msg_idx}"
                     st.session_state[_ck] = not st.session_state.get(_ck, False)
-            with _qc2:
-                if st.button("🔄 Reload", key=f"reload_q_{_msg_idx}", use_container_width=True,
-                             help="Re-ask this question"):
+                st.markdown('</div>', unsafe_allow_html=True)
+            with _qreload_col:
+                st.markdown(
+                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding-top:6px;">',
+                    unsafe_allow_html=True,
+                )
+                if st.button("🔄", key=f"reload_q_{_msg_idx}",
+                             use_container_width=True, help="Re-ask this question"):
                     st.session_state["_pending_query"] = _q_text
                     st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
             if st.session_state.get(f"_show_copy_q_{_msg_idx}"):
                 st.code(_q_text, language=None)
         else:
