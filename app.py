@@ -739,7 +739,12 @@ _H_STOP = {
 }
 
 def _heading_match(query: str, heading: str) -> int:
-    """Count overlapping meaningful words (prefix-aware) between query and heading."""
+    """Count overlapping meaningful words (prefix-aware) between query and heading.
+
+    Single-word section headings (e.g. 'Demography', 'Introduction') are treated
+    as equivalent to a 2-word match when the query contains that word, because there
+    is no way to score higher on a one-word heading.
+    """
     def _w(s):
         return {w for w in re.findall(r'\b\w{3,}\b', s.lower()) if w not in _H_STOP}
     q, h = _w(query), _w(heading)
@@ -749,6 +754,10 @@ def _heading_match(query: str, heading: str) -> int:
             if qw == hw or (len(qw) >= 5 and (qw.startswith(hw[:5]) or hw.startswith(qw[:5]))):
                 count += 1
                 break
+    # A single-word heading that matches is as strong as a two-word match
+    # (e.g. heading "Demography" matched by query "demography from eCRF guidelines")
+    if count >= 1 and len(h) == 1:
+        return 2
     return count
 
 
