@@ -1998,42 +1998,31 @@ else:
             # ── Feedback buttons (last assistant message only) ────────────────
             if _is_last and st.session_state.get("_awaiting_feedback"):
                 st.markdown("""<style>
-/* Feedback row — solid backgrounds + white text: visible on any bg color */
-div[data-testid="stHorizontalBlock"] > div:nth-child(1) button[data-testid="baseButton-secondary"] {
-    background: #2563eb !important;
-    border: none !important;
-    color: #ffffff !important;
-    font-weight: 700 !important;
-    border-radius: 6px !important;
+/* Feedback buttons — white background, black text, clearly visible on dark bg */
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button {
+    background: #ffffff !important;
+    border: 1.5px solid #cccccc !important;
+    color: #111111 !important;
+    -webkit-text-fill-color: #111111 !important;
+    font-weight: 600 !important;
+    font-size: 0.92rem !important;
+    border-radius: 8px !important;
+    min-height: 44px !important;
+    height: 44px !important;
+    padding: 8px 20px !important;
+    line-height: 1.2 !important;
+    width: 100% !important;
 }
-div[data-testid="stHorizontalBlock"] > div:nth-child(1) button[data-testid="baseButton-secondary"]:hover {
-    background: #1d4ed8 !important;
-}
-div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="baseButton-secondary"] {
-    background: #7c3aed !important;
-    border: none !important;
-    color: #ffffff !important;
-    font-weight: 700 !important;
-    border-radius: 6px !important;
-}
-div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="baseButton-secondary"]:hover {
-    background: #6d28d9 !important;
-}
-div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="baseButton-secondary"] {
-    background: #dc2626 !important;
-    border: none !important;
-    color: #ffffff !important;
-    font-weight: 700 !important;
-    border-radius: 6px !important;
-}
-div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="baseButton-secondary"]:hover {
-    background: #b91c1c !important;
+div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
+    background: #f0f0f0 !important;
+    border-color: #888888 !important;
+    color: #000000 !important;
+    -webkit-text-fill-color: #000000 !important;
 }
 </style>""", unsafe_allow_html=True)
                 st.markdown(
-                    '<div style="display:flex;align-items:center;gap:10px;'
-                    'margin:6px 0 6px 0;font-size:.85rem;color:#f0eeff;font-weight:700;">'
-                    'Is this information correct?</div>',
+                    '<div style="font-size:.88rem;color:#f0eeff;font-weight:700;'
+                    'margin:8px 0 6px 0;">Is this information correct?</div>',
                     unsafe_allow_html=True,
                 )
                 _fb_col1, _fb_col2, _fb_col3, _ = st.columns([1, 1.4, 1, 4.6])
