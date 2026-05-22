@@ -2204,9 +2204,37 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
         # When user asks for a specific CDISC domain, keep only chunks that
         # mention that domain — prevents returning all domains from the file.
         _query_domain = _domain_in_q   # used for table-row filter below
-        _domain_result = _domain_filter(pending, relevant)
-        if _domain_result is not None:
-            relevant = _domain_result or relevant
+        if _query_domain:
+            # Hard scan: semantic search often misses domain-specific pages because
+            # "DM edit checks" and "AE edit checks" have similar embeddings.
+            # Scan ALL chunks in the matched document(s) for the domain code so we
+            # always find the right pages regardless of ranking.
+            _dom_scan_re = re.compile(r'\b' + re.escape(_query_domain) + r'\b')
+            _scan_pool = [
+                c for c in st.session_state.doc_chunks
+                if c["source"] in _matched_srcs
+            ] if _matched_srcs != {c["source"] for c in st.session_state.doc_chunks} else st.session_state.doc_chunks
+            _domain_chunks = [
+                c for c in _scan_pool
+                if _dom_scan_re.search(c.get("text", ""))
+                or _dom_scan_re.search(c.get("heading", ""))
+                or any(
+                    _dom_scan_re.search(str(cell))
+                    for t in c.get("tables", [])
+                    for row in t
+                    for cell in row
+                )
+            ]
+            if _domain_chunks:
+                # Domain chunks become the authoritative source; keep semantic hits
+                # only as supplementary context for pages not already covered.
+                _dc_keys = {(c["source"], c["page"]) for c in _domain_chunks}
+                relevant = _domain_chunks + [c for c in relevant if (c["source"], c["page"]) not in _dc_keys]
+            # If hard scan found nothing, fall back to semantic results unchanged
+        else:
+            _domain_result = _domain_filter(pending, relevant)
+            if _domain_result is not None:
+                relevant = _domain_result or relevant
 
         context = build_context(relevant)
 
@@ -2358,7 +2386,16 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
 
             # Build the answer bubble — minimal heading + source info only
             top_heading = ""
-            if render_chunks:
+            if _query_domain:
+                # For domain queries the chunk heading often reflects a different domain
+                # (e.g. "AE Domain Edit Checks" when user asked for DM).
+                # Use the user's query as the heading, with the domain code uppercased.
+                _th = pending.strip().title()
+                top_heading = re.sub(
+                    r'\b' + re.escape(_query_domain.title()) + r'\b',
+                    _query_domain.upper(), _th
+                )
+            elif render_chunks:
                 best = max(render_chunks, key=lambda c: c["_hscore"])
                 top_heading = best.get("heading") or pending.strip().title()
             answer_html = f"<b>{_html_mod.escape(top_heading)}</b>"
