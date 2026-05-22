@@ -1156,7 +1156,13 @@ def _doc_filter(query: str, all_chunks: list) -> tuple:
         # Also test the full stem (space-normalised) as a phrase
         stem_phrase = re.sub(r'[\-_\.]+', ' ', stem.lower())
         identifiers = distinctive + [stem_phrase]
-        if any(ident and ident in q_lower for ident in identifiers):
+        # Use word-boundary matching so "check" in a filename does not match
+        # "checks" in the query (substring match caused Edit Check Spec to be
+        # included when user asked "from the DRP" with "checks" in the query).
+        if any(
+            ident and re.search(r'\b' + re.escape(ident) + r'\b', q_lower)
+            for ident in identifiers
+        ):
             matched.append(src)
 
     if not matched:
