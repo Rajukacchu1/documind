@@ -1185,15 +1185,14 @@ def retrieve(query: str, chunks, embeddings, top_k=5):
     result = [pool[candidate_local[i]] for i in top_local]
     result = result or pool[:top_k]
 
-    # Table-reference expansion: only for schedule/table queries
+    # Schedule queries are handled by the targeted anchor block below —
+    # skip broad _expand_table_refs to avoid pulling in unrelated pages.
     _TABLE_Q_INNER = re.compile(
         r'\b(assessment\s+schedule|schedule\s+of\s+assessments?|'
         r'visit\s+schedule|time\s+and\s+events?|'
         r'procedures?\s+and\s+assessments?)\b',
         re.IGNORECASE
     )
-    if _TABLE_Q_INNER.search(query):
-        result = _expand_table_refs(result, pool)
 
     # ── Targeted schedule/table search ──────────────────────────────────────
     # Only triggered when the query explicitly asks for a schedule or table.
@@ -1208,45 +1207,58 @@ def retrieve(query: str, chunks, embeddings, top_k=5):
     )
     if TABLE_Q.search(query):
         by_src_page = {(c["source"], c["page"]): c for c in pool}
-        seen_keys   = {(c["source"], c["page"]) for c in result}
-
-        # Anchor: pages where "Schedule of Assessments" appears as a HEADING
-        # (i.e. the phrase is prominent, not buried mid-paragraph)
         SCHED_HEADING = re.compile(
             r'\b(schedule\s+of\s+assessments?|assessment\s+schedule|'
             r'time\s+and\s+events?\s+table|visit\s+schedule)\b',
             re.IGNORECASE
         )
-        anchor_pages = sorted(
-            {(c["source"], c["page"]) for c in pool
-             if SCHED_HEADING.search(c.get("text", ""))},
-            key=lambda x: x[1]   # ascending page order
-        )
-
-        # Take only the first 2 anchors and add pages forward — enough for multi-page tables.
-        # Skip TOC-only mentions: prefer anchors where the heading is on a page that also
-        # has table data (extracted tables or x-grid markers).
         X_GRID = re.compile(r'(?:^|\s)[xX](?:[\s\t]+[xX]){2,}', re.MULTILINE)
-        def _anchor_score(src_page):
-            c = by_src_page.get(src_page)
+        TOC_RE = re.compile(r'\.{3,}\s*\d+', re.MULTILINE)
+
+        def _anchor_score(sp):
+            c = by_src_page.get(sp)
             if not c:
                 return 0
-            has_table = 1 if c.get("tables") else 0
-            has_xgrid = 1 if X_GRID.search(c.get("text", "")) else 0
-            return has_table + has_xgrid
+            return (2 if c.get("tables") else 0) + (1 if X_GRID.search(c.get("text", "")) else 0)
 
-        anchor_pages = sorted(anchor_pages, key=_anchor_score, reverse=True)
-        TOC_RE = re.compile(r'\.{3,}\s*\d+', re.MULTILINE)
-        for src, page in anchor_pages[:3]:
-            chunk = by_src_page.get((src, page))
-            # TOC pages list sections with "......N" dot-leaders — detect and use wider range
-            is_toc = bool(chunk and TOC_RE.search(chunk.get("text", "")))
-            fwd = 15 if is_toc else 9
-            for offset in range(-1, fwd):
-                key = (src, page + offset)
-                if key in by_src_page and key not in seen_keys:
-                    result.append(by_src_page[key])
-                    seen_keys.add(key)
+        # All pages that mention the schedule heading
+        heading_pages = sorted(
+            {(c["source"], c["page"]) for c in pool
+             if SCHED_HEADING.search(c.get("text", ""))},
+            key=lambda x: x[1]
+        )
+
+        # Split: pages that HAVE actual table data vs. TOC/mention-only pages
+        real_pages = [(s, p) for s, p in heading_pages if _anchor_score((s, p)) > 0]
+        toc_pages  = [(s, p) for s, p in heading_pages if _anchor_score((s, p)) == 0]
+
+        sched_result: list = []
+        seen_sched: set = set()
+
+        if real_pages:
+            # Expand slightly from each real table page (handles multi-page tables)
+            for src, page in real_pages[:2]:
+                for offset in range(-1, 4):
+                    key = (src, page + offset)
+                    if key in by_src_page and key not in seen_sched:
+                        sched_result.append(by_src_page[key])
+                        seen_sched.add(key)
+        else:
+            # Only TOC mentions found — search forward from them, keep only table pages
+            for src, page in toc_pages[:2]:
+                for offset in range(0, 16):
+                    key = (src, page + offset)
+                    if key in by_src_page and key not in seen_sched and _anchor_score(key) > 0:
+                        sched_result.append(by_src_page[key])
+                        seen_sched.add(key)
+
+        if sched_result:
+            # Return ONLY the schedule table pages (max 4 for multi-page tables)
+            result = sorted(
+                sched_result,
+                key=lambda c: (-_anchor_score((c["source"], c["page"])), c["page"])
+            )[:4]
+            return result  # early return — skip broad final trim
 
     # ── Final trim: never send more than 12 chunks to the LLM ───────────────
     # Prioritise: pages with tables > pages matching schedule keywords > rest
