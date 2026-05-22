@@ -2102,33 +2102,27 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
         </div>
         """, unsafe_allow_html=True)
 
+    # Unique anchor — ID changes with message count so browser always sees it as new
+    _anchor_id = f"chat-bottom-{len(st.session_state.get('messages', []))}"
+    st.markdown(f'<div id="{_anchor_id}" style="height:1px;"></div>', unsafe_allow_html=True)
+
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Auto-scroll — scroll main Streamlit container to bottom on every rerun
-    st.markdown("""
+    # Auto-scroll — scrollIntoView finds the real scrollable ancestor automatically
+    st.markdown(f"""
     <script>
-    (function() {
-        function scrollToBottom() {
-            // Streamlit renders inside [data-testid="stMain"] > div > div
-            var targets = [
-                document.querySelector('[data-testid="stMain"]'),
-                document.querySelector('.main'),
-                document.querySelector('.block-container'),
-                document.documentElement,
-                document.body
-            ];
-            for (var i = 0; i < targets.length; i++) {
-                if (targets[i]) {
-                    targets[i].scrollTop = targets[i].scrollHeight;
-                }
-            }
-            window.scrollTo(0, document.body.scrollHeight);
-        }
-        // Run immediately and again after DOM settles
-        scrollToBottom();
-        setTimeout(scrollToBottom, 100);
-        setTimeout(scrollToBottom, 350);
-    })();
+    (function() {{
+        function scrollToAnchor() {{
+            var el = document.getElementById('{_anchor_id}');
+            if (el) {{
+                el.scrollIntoView({{block: 'end'}});
+            }}
+        }}
+        scrollToAnchor();
+        setTimeout(scrollToAnchor, 150);
+        setTimeout(scrollToAnchor, 500);
+        setTimeout(scrollToAnchor, 1000);
+    }})();
     </script>
     """, unsafe_allow_html=True)
 
