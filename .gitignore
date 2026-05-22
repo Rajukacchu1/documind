@@ -1,6 +1,9 @@
 # Uploaded documents (keep private)
 docs/
 
+# Learned answers (user-specific, not part of the codebase)
+learned_answers.json
+
 # Environment / secrets
 .env
 *.env

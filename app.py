@@ -1,6 +1,7 @@
 import streamlit as st
 import os
 import re
+import json
 from pathlib import Path
 import base64
 from io import BytesIO
@@ -582,8 +583,40 @@ if "doc_pdf_bytes" not in st.session_state:
     st.session_state.doc_pdf_bytes = {}   # filename → raw PDF bytes for page rendering
 if "page_img_cache" not in st.session_state:
     st.session_state.page_img_cache = {}  # (filename, page_num, mode) → base64 PNG
+_LEARNED_FILE = Path(__file__).parent / "learned_answers.json"
+
+
+def _save_learned_to_disk(learned: list) -> None:
+    """Persist confirmed Q&A pairs to disk (images stripped to keep file small)."""
+    saveable = []
+    for la in learned:
+        msg = {k: v for k, v in la["message"].items() if k != "images"}
+        saveable.append({"query": la["query"], "message": msg})
+    try:
+        _LEARNED_FILE.write_text(
+            json.dumps(saveable, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+def _load_learned_from_disk() -> list:
+    """Load persisted Q&A pairs, restoring default fields."""
+    if not _LEARNED_FILE.exists():
+        return []
+    try:
+        data = json.loads(_LEARNED_FILE.read_text(encoding="utf-8"))
+        for la in data:
+            la["message"].setdefault("images", [])
+            la["message"].setdefault("tables", [])
+            la["message"].setdefault("sources", [])
+        return data
+    except Exception:
+        return []
+
+
 if "learned_answers" not in st.session_state:
-    st.session_state.learned_answers = [] # [{query, message}] saved on user confirmation
+    st.session_state.learned_answers = _load_learned_from_disk()
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -1425,13 +1458,23 @@ def ask_llm(query: str, context: str, vision_images: list = None, table_query: b
             f"Instruction: {instruction}"
         ),
     })
-    msg = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        system=system,
-        messages=[{"role": "user", "content": user_content}],
-    )
-    return msg.content[0].text
+    try:
+        msg = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4096,
+            system=system,
+            messages=[{"role": "user", "content": user_content}],
+        )
+        return msg.content[0].text
+    except Exception as _e:
+        _em = str(_e).lower()
+        if "401" in _em or "authentication" in _em or "api_key" in _em or "x-api-key" in _em:
+            return "⚠️ **Invalid API key.** Please enter a valid Anthropic API key in the sidebar."
+        if "429" in _em or "rate_limit" in _em:
+            return "⚠️ **Rate limit reached.** Please wait a moment and try again."
+        if "overloaded" in _em or "529" in _em:
+            return "⚠️ **Anthropic API is temporarily overloaded.** Please retry in a few seconds."
+        return f"⚠️ **API error:** {str(_e)}"
 
 
 def table_to_html(rows):
@@ -1812,17 +1855,15 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                             "query":   _fq,
                             "message": dict(msg),
                         })
+                        _save_learned_to_disk(st.session_state.learned_answers)
                         st.session_state.pop("_awaiting_feedback", None)
                         st.toast("Saved! I'll use this answer for similar questions.", icon="✅")
                         st.rerun()
                 with _fb_col2:
                     if st.button("⚠️ Partially", key="fb_partial", use_container_width=True):
-                        # Save the partial answer AND retry — keep direct render path
+                        # Do NOT permanently save — just retry for a more complete answer.
+                        # Only "Yes" persists to disk.
                         _fq = st.session_state.pop("_feedback_query", "")
-                        st.session_state.learned_answers.append({
-                            "query":   _fq,
-                            "message": dict(msg),
-                        })
                         st.session_state.pop("_awaiting_feedback", None)
                         if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
                             st.session_state.messages.pop()
