@@ -1750,19 +1750,9 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            # Copy-to-clipboard button for this answer
-            _copy_raw = msg.get("content", answer_html)
-            _copy_safe = _copy_raw.replace("\\", "\\\\").replace("`", "'").replace("\n", " ").replace('"', '\\"')
-            st.markdown(
-                f'<button onclick="navigator.clipboard.writeText(document.getElementById('
-                f'&quot;ans-bubble-{_msg_idx}&quot;).innerText).then(function(){{this.textContent=\'✓ Copied!\';'
-                f'setTimeout(function(){{document.querySelector(\'[data-copy-idx=&quot;{_msg_idx}&quot;]\').textContent=\'📋 Copy Answer\'}},2000)}}.bind(this))" '
-                f'data-copy-idx="{_msg_idx}" '
-                f'style="background:rgba(100,70,220,.12);border:1px solid #8866ff;color:#000000;'
-                f'border-radius:6px;padding:3px 12px;cursor:pointer;font-size:.75rem;margin:4px 0 2px 52px;">'
-                f'📋 Copy Answer</button>',
-                unsafe_allow_html=True,
-            )
+            # Copy answer — st.expander shows the text with Streamlit's built-in copy icon
+            with st.expander("📋 Copy Answer"):
+                st.code(msg.get("content", ""), language=None)
 
             # Inline images (page renders + classified doc images)
             if images:
@@ -1942,20 +1932,18 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
             ""
         )
         if _last_user_q:
-            _copy_q_safe = _last_user_q.replace('"', '\\"').replace("\n", " ").replace("`", "'")
-            _util_col1, _util_col2, _util_rest = st.columns([1.2, 1.2, 7.6])
+            _util_col1, _util_col2, _util_rest = st.columns([1, 1, 8])
             with _util_col1:
-                st.markdown(
-                    f'<button onclick="navigator.clipboard.writeText(\"{_copy_q_safe}\").then(function(){{this.textContent=\'✓ Copied!\';setTimeout(()=>this.textContent=\'📋 Copy Q\',2000)}})"'
-                    f' style="background:rgba(100,70,220,.12);border:1px solid #8866ff;color:#000000;'
-                    f'border-radius:6px;padding:4px 14px;cursor:pointer;font-size:.78rem;width:100%;">'
-                    f'📋 Copy Q</button>',
-                    unsafe_allow_html=True,
-                )
+                if st.button("📋 Copy Q", key="copy_last_q", use_container_width=True):
+                    st.session_state["_show_copy_q"] = not st.session_state.get("_show_copy_q", False)
             with _util_col2:
-                if st.button("🔄 Reload Q", key="reload_last_q", help="Re-ask the last question"):
+                if st.button("🔄 Reload Q", key="reload_last_q", use_container_width=True,
+                             help="Re-ask the last question"):
                     st.session_state["_pending_query"] = _last_user_q
                     st.rerun()
+            # Show copyable text when toggled — st.code has a built-in copy icon
+            if st.session_state.get("_show_copy_q"):
+                st.code(_last_user_q, language=None)
 
     # Process pending query (only runs when _pending_query is still set after the
     # Stop button check above — i.e., user did not click Stop on this rerun)
