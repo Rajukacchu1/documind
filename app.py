@@ -1185,6 +1185,28 @@ def retrieve(query: str, chunks, embeddings, top_k=5):
     result = [pool[candidate_local[i]] for i in top_local]
     result = result or pool[:top_k]
 
+    # Heading-based expansion: find pages whose section heading directly matches
+    # the query (e.g. "9.4.2 Statistical model, hypothesis, and method of analysis").
+    # Semantic search may miss the actual section page if it's outranked by pages
+    # that scatter the same keywords throughout body text.
+    _seen_hm  = {(c["source"], c["page"]) for c in result}
+    _by_sp    = {(c["source"], c["page"]): c for c in pool}
+    _hm_hits  = sorted(
+        [(c, _heading_match(query, c.get("heading", ""))) for c in pool
+         if _heading_match(query, c.get("heading", "")) >= 2],
+        key=lambda x: -x[1]
+    )
+    for _hm_c, _ in _hm_hits[:3]:
+        sp = (_hm_c["source"], _hm_c["page"])
+        if sp not in _seen_hm:
+            result.append(_hm_c)
+            _seen_hm.add(sp)
+        # Add the following page in case the section continues
+        sp1 = (_hm_c["source"], _hm_c["page"] + 1)
+        if sp1 in _by_sp and sp1 not in _seen_hm:
+            result.append(_by_sp[sp1])
+            _seen_hm.add(sp1)
+
     # Schedule queries are handled by the targeted anchor block below —
     # skip broad _expand_table_refs to avoid pulling in unrelated pages.
     _TABLE_Q_INNER = re.compile(
@@ -1741,28 +1763,37 @@ else:
             # ── Feedback buttons (last assistant message only) ────────────────
             if _is_last and st.session_state.get("_awaiting_feedback"):
                 st.markdown("""<style>
+/* Yes — blue-purple */
 div[data-testid="stHorizontalBlock"] > div:nth-child(1) button[data-testid="baseButton-secondary"] {
-    background: rgba(64,200,128,.18) !important;
-    border: 1.5px solid #40c880 !important;
-    color: #40c880 !important;
+    background: rgba(70,130,220,.22) !important;
+    border: 1.5px solid #6699ff !important;
+    color: #aabbff !important;
     font-weight: 700 !important;
 }
+/* Partially Correct — mid purple */
 div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="baseButton-secondary"] {
-    background: rgba(220,50,50,.22) !important;
-    border: 1.5px solid #ff5555 !important;
-    color: #ff7070 !important;
+    background: rgba(130,80,220,.22) !important;
+    border: 1.5px solid #aa77ff !important;
+    color: #cc99ff !important;
+    font-weight: 700 !important;
+}
+/* No — magenta-purple */
+div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="baseButton-secondary"] {
+    background: rgba(200,60,180,.22) !important;
+    border: 1.5px solid #dd55cc !important;
+    color: #ee88ee !important;
     font-weight: 700 !important;
 }
 </style>""", unsafe_allow_html=True)
                 st.markdown(
                     '<div style="display:flex;align-items:center;gap:10px;'
-                    'margin:6px 0 4px 0;font-size:.82rem;color:#9090b8;">Is this information correct?</div>',
+                    'margin:6px 0 4px 0;font-size:.82rem;color:#9090b8;">'
+                    'Is this information correct?</div>',
                     unsafe_allow_html=True,
                 )
-                _fb_col1, _fb_col2, _fb_rest = st.columns([1, 1, 6])
+                _fb_col1, _fb_col2, _fb_col3, _fb_rest = st.columns([1, 1.4, 1, 4.6])
                 with _fb_col1:
                     if st.button("✅ Yes", key="fb_yes", use_container_width=True):
-                        # Save this Q&A so future similar questions get the same answer
                         _fq = st.session_state.pop("_feedback_query", "")
                         st.session_state.learned_answers.append({
                             "query":   _fq,
@@ -1772,14 +1803,26 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="base
                         st.toast("Saved! I'll use this answer for similar questions.", icon="✅")
                         st.rerun()
                 with _fb_col2:
-                    if st.button("❌ No", key="fb_no", use_container_width=True):
-                        # Remove the incorrect answer and retry via LLM path
+                    if st.button("⚠️ Partially", key="fb_partial", use_container_width=True):
+                        # Save the partial answer AND retry for more detail
                         _fq = st.session_state.pop("_feedback_query", "")
+                        st.session_state.learned_answers.append({
+                            "query":   _fq,
+                            "message": dict(msg),
+                        })
                         st.session_state.pop("_awaiting_feedback", None)
-                        # Remove last assistant message
                         if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
                             st.session_state.messages.pop()
-                        # Re-queue with retry flag (forces LLM path)
+                        st.session_state["_pending_query"] = _fq
+                        st.session_state["_retry_mode"]    = True
+                        st.toast("Looking for more complete information…", icon="🔍")
+                        st.rerun()
+                with _fb_col3:
+                    if st.button("❌ No", key="fb_no", use_container_width=True):
+                        _fq = st.session_state.pop("_feedback_query", "")
+                        st.session_state.pop("_awaiting_feedback", None)
+                        if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
+                            st.session_state.messages.pop()
                         st.session_state["_pending_query"] = _fq
                         st.session_state["_retry_mode"]    = True
                         st.rerun()
@@ -1827,9 +1870,9 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="base
         .stop-hint { font-size:.8rem; color:#9090b8; font-family:'Inter',sans-serif; }
         /* Valid selector: data-testid is the real attribute Streamlit sets on buttons */
         button[data-testid="baseButton-secondary"] {
-            background: rgba(220,50,50,.22) !important;
-            border: 1.5px solid #ff5555 !important;
-            color: #ff7070 !important;
+            background: rgba(100,70,220,.22) !important;
+            border: 1.5px solid #8866ff !important;
+            color: #aa99ff !important;
             border-radius: 8px !important;
             font-weight: 700 !important;
             font-size: .88rem !important;
@@ -1838,8 +1881,8 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="base
             transition: background .2s, box-shadow .2s !important;
         }
         button[data-testid="baseButton-secondary"]:hover {
-            background: rgba(220,50,50,.40) !important;
-            box-shadow: 0 0 12px rgba(220,50,50,.45) !important;
+            background: rgba(100,70,220,.40) !important;
+            box-shadow: 0 0 12px rgba(100,70,220,.45) !important;
         }
         </style>
         <div class="stop-row">
