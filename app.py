@@ -578,6 +578,10 @@ if "embeddings" not in st.session_state:
     st.session_state.embeddings = None
 if "loaded_files" not in st.session_state:
     st.session_state.loaded_files = []
+if "doc_pdf_bytes" not in st.session_state:
+    st.session_state.doc_pdf_bytes = {}   # filename → raw PDF bytes for page rendering
+if "page_img_cache" not in st.session_state:
+    st.session_state.page_img_cache = {}  # (filename, page_num) → base64 PNG
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -746,6 +750,33 @@ def _heading_match(query: str, heading: str) -> int:
     return count
 
 
+def get_page_image(filename: str, page_num: int) -> str | None:
+    """
+    Render a PDF page as a base64 PNG and return it.
+    This shows the page EXACTLY as it appears in the document — tables,
+    images, and text all preserved in their original layout.
+    Results are cached in session state to avoid re-rendering.
+    """
+    cache_key = (filename, page_num)
+    cached = st.session_state.page_img_cache.get(cache_key)
+    if cached:
+        return cached
+    pdf_bytes = st.session_state.doc_pdf_bytes.get(filename)
+    if not pdf_bytes or not PYMUPDF_OK:
+        return None
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        page = doc[page_num - 1]
+        mat = fitz.Matrix(1.8, 1.8)   # ~130 DPI — readable without being huge
+        pix = page.get_pixmap(matrix=mat, alpha=False)
+        b64 = base64.b64encode(pix.tobytes("png")).decode()
+        doc.close()
+        st.session_state.page_img_cache[cache_key] = b64
+        return b64
+    except Exception:
+        return None
+
+
 def extract_pdf(file_bytes: bytes, filename: str):
     """Extract text, tables, images chunk-by-chunk from PDF."""
     chunks = []
@@ -774,86 +805,11 @@ def extract_pdf(file_bytes: bytes, filename: str):
         except Exception:
             pass
 
-        # Method 2: Word-position with column-boundary detection.
-        # Groups words by Y (row), detects significant X gaps to define column
-        # boundaries, then merges words within the same column into one cell.
-        # This correctly produces ["Obtain informed consent", "x"] instead of
-        # ["Obtain", "informed", "consent", "x"].
-        if not tables:
-            try:
-                words = page.get_text("words")  # (x0,y0,x1,y1,word,blk,ln,wrd)
-                if words and len(words) >= 10:
-                    TOL = 4  # pt — words within 4pt vertically = same row
-                    rows_by_y: dict = {}
-                    for w in words:
-                        y_key = round(w[1] / TOL) * TOL
-                        rows_by_y.setdefault(y_key, []).append(
-                            (w[0], w[2], w[4])  # x0, x1, word
-                        )
-                    y_sorted = sorted(rows_by_y.items())
-
-                    if len(y_sorted) >= 4:
-                        # Collect all word mid-X positions to find column gaps
-                        all_x = sorted((w[0]+w[2])/2 for w in words)
-                        gaps = [(all_x[i+1]-all_x[i], all_x[i+1])
-                                for i in range(len(all_x)-1)]
-                        if gaps:
-                            gap_vals = sorted(g[0] for g in gaps)
-                            median_gap = gap_vals[len(gap_vals)//2]
-                            # A "column gap" is at least 4× the median inter-word gap
-                            col_boundaries = [all_x[0]] + [
-                                x_after for size, x_after in gaps
-                                if size >= max(median_gap * 4, 8)
-                            ]
-                        else:
-                            col_boundaries = []
-
-                        if len(col_boundaries) >= 2:
-                            def _to_col(x_mid, bounds):
-                                for i in range(len(bounds)-1):
-                                    mid = (bounds[i] + bounds[i+1]) / 2
-                                    if x_mid < mid:
-                                        return i
-                                return len(bounds)-1
-
-                            structured: list = []
-                            for _, row_words in y_sorted:
-                                col_cells: dict = {}
-                                for x0, x1, word in row_words:
-                                    ci = _to_col((x0+x1)/2, col_boundaries)
-                                    col_cells.setdefault(ci, []).append(word)
-                                max_col = max(col_cells) if col_cells else 0
-                                row = [
-                                    " ".join(col_cells.get(i, []))
-                                    for i in range(max_col+1)
-                                ]
-                                row = [c.strip() for c in row if c.strip()]
-                                if len(row) >= 2:
-                                    structured.append(row)
-
-                            if len(structured) >= 4:
-                                all_c = [c for r in structured for c in r]
-                                short_r = sum(1 for c in all_c if len(c) <= 3) / max(len(all_c), 1)
-                                mw = sum(1 for c in all_c if " " in c) / max(len(all_c), 1)
-                                if short_r >= 0.3 or mw >= 0.1:
-                                    tables.append(structured)
-            except Exception:
-                pass
-
-        # Method 3: Line-split fallback for x-marker grids.
-        # Splits lines by tabs OR 2+ spaces to preserve multi-word cells.
-        if not tables:
-            _XG = re.compile(r'\b[xX]\b.*\b[xX]\b.*\b[xX]\b', re.MULTILINE)
-            if _XG.search(text):
-                raw_rows = []
-                for line in text.splitlines():
-                    # Split on one-or-more tabs OR two-or-more spaces
-                    parts = [p.strip() for p in re.split(r'\t+|\s{2,}', line.rstrip())
-                             if p.strip()]
-                    if len(parts) >= 2:
-                        raw_rows.append(parts)
-                if len(raw_rows) >= 3:
-                    tables.append(raw_rows)
+        # Method 1 is the only extraction method used.
+        # Noisy word-position reconstruction (old Methods 2 & 3) has been removed.
+        # When Method 1 cannot detect a table (borderless layouts), the page is
+        # rendered as a full-fidelity image via get_page_image() at query time,
+        # so the user always sees content exactly as it appears in the PDF.
         if text or images or tables:
             chunks.append({
                 "text": text,
@@ -1525,6 +1481,8 @@ with st.sidebar:
         st.session_state.embeddings = None
         st.session_state.loaded_files = []
         st.session_state.messages = []
+        st.session_state.doc_pdf_bytes = {}
+        st.session_state.page_img_cache = {}
         st.rerun()
 
     if load_btn:
@@ -1538,13 +1496,20 @@ with st.sidebar:
         if uploaded_files:
             for f in uploaded_files:
                 if f.name not in st.session_state.loaded_files:
-                    tasks.append((f.name, f.read()))
+                    data = f.read()
+                    tasks.append((f.name, data))
+                    # Store raw PDF bytes so pages can be rendered as images later
+                    if f.name.lower().endswith(".pdf"):
+                        st.session_state.doc_pdf_bytes[f.name] = data
 
         if folder_path and Path(folder_path).is_dir():
             for fp in Path(folder_path).rglob("*"):
                 if fp.suffix.lower() in EXTS and fp.name not in st.session_state.loaded_files:
                     try:
-                        tasks.append((fp.name, fp.read_bytes()))
+                        data = fp.read_bytes()
+                        tasks.append((fp.name, data))
+                        if fp.suffix.lower() == ".pdf":
+                            st.session_state.doc_pdf_bytes[fp.name] = data
                     except Exception:
                         pass
 
@@ -1862,22 +1827,31 @@ else:
 
             # Classify each chunk by its dominant content type
             direct_tables:  list = []
-            direct_images:  list = []
-            direct_texts:   list = []
-            seen_tbl:  set = set()
-            seen_img:  set = set()
+            direct_images:  list = []   # (b64, src, pg) — page renders + classified images
+            direct_texts:   list = []   # (text, src, pg) — verbatim text sections
+            seen_pages: set = set()
+            seen_img:   set = set()
+            import html as _html_mod
 
             for c in render_chunks:
                 src, pg = c["source"], c["page"]
+                page_key = (src, pg)
 
-                # Tables — apply quality filter to reject word-position noise
+                # ── Structured table (Method 1 / find_tables) → dataframe ──
                 for t in c.get("tables", []):
-                    key = (src, pg)
-                    if key not in seen_tbl and _is_quality_table(t):
-                        seen_tbl.add(key)
+                    if page_key not in seen_pages and _is_quality_table(t):
+                        seen_pages.add(page_key)
                         direct_tables.append((t, src, pg))
 
-                # Images — classify and collect
+                # ── No structured table → render the PDF page as an image ──
+                # This shows the content EXACTLY as it appears in the document.
+                if page_key not in seen_pages and src.lower().endswith(".pdf"):
+                    img_b64 = get_page_image(src, pg)
+                    if img_b64:
+                        seen_pages.add(page_key)
+                        direct_images.append((img_b64, src, pg))
+
+                # ── Embedded images in the document ──
                 for b64 in c.get("images", []):
                     if b64 not in seen_img:
                         seen_img.add(b64)
@@ -1887,27 +1861,28 @@ else:
                                 direct_tables.append((rows, src, pg))
                             elif kind == "relevant":
                                 direct_images.append((b64, src, pg))
-                            # irrelevant → dropped
                         else:
                             direct_images.append((b64, src, pg))
 
-                # Text — only for non-table-query chunks that have NO extracted table
-                if not _is_table_q and not c.get("tables") and c.get("text", "").strip():
-                    direct_texts.append((c["text"].strip(), src, pg))
+                # ── Text sections (non-PDF or non-table chunks) ──
+                if page_key not in seen_pages and not c.get("tables"):
+                    if c.get("text", "").strip():
+                        seen_pages.add(page_key)
+                        direct_texts.append((c["text"].strip(), src, pg))
 
-            # Build the answer bubble: section heading + verbatim text (if any)
-            import html as _html_mod
+            # Build the answer bubble — minimal heading + source info only
             top_heading = ""
             if render_chunks:
                 best = max(render_chunks, key=lambda c: c["_hscore"])
                 top_heading = best.get("heading") or pending.strip().title()
             answer_html = f"<b>{_html_mod.escape(top_heading)}</b>"
 
-            if direct_texts and not _is_table_q:
+            # Verbatim text (DOCX / TXT / non-PDF sources)
+            if direct_texts:
                 text_html = "<br><br>".join(
                     _html_mod.escape(txt).replace("\n", "<br>")
-                    + f'<br><span style="font-size:.75rem;color:#9090b8">'
-                    f'[{_html_mod.escape(src)}, Page {pg}]</span>'
+                    + f'<br><span style="font-size:.75rem;color:#9090b8;">'
+                      f'[{_html_mod.escape(src)}, Page {pg}]</span>'
                     for txt, src, pg in direct_texts
                 )
                 answer_html += "<br><br>" + text_html
