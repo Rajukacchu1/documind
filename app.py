@@ -699,8 +699,14 @@ def _is_quality_table(rows: list) -> bool:
     # Path 2 — structural table: consistent column width + multi-word cells
     avg_cols = sum(col_counts) / len(col_counts)
     col_spread = max(col_counts) - min(col_counts)
-    multiword = sum(1 for c in cells if " " in c and len(c) > 6)
-    if col_spread <= 2 and avg_cols >= 3 and multiword >= 2:
+    multiword = sum(1 for c in cells if " " in c and len(c) > 4)
+    if col_spread <= 3 and avg_cols >= 2 and multiword >= 2:
+        return True
+
+    # Path 3 — schedule table with numbers as markers (week/visit numbers)
+    number_cells = sum(1 for c in cells if re.match(r'^-?\d+$', c))
+    multiword2 = sum(1 for c in cells if " " in c)
+    if number_cells >= 3 and multiword2 >= 2:
         return True
 
     return False
@@ -768,39 +774,82 @@ def extract_pdf(file_bytes: bytes, filename: str):
         except Exception:
             pass
 
-        # Method 2: Word-position reconstruction (best for borderless/complex tables)
-        # Groups words by Y coordinate into rows, sorts by X within each row.
-        # Clinical assessment schedules score well here: wide tables with short cells.
+        # Method 2: Word-position with column-boundary detection.
+        # Groups words by Y (row), detects significant X gaps to define column
+        # boundaries, then merges words within the same column into one cell.
+        # This correctly produces ["Obtain informed consent", "x"] instead of
+        # ["Obtain", "informed", "consent", "x"].
         if not tables:
             try:
                 words = page.get_text("words")  # (x0,y0,x1,y1,word,blk,ln,wrd)
-                if words and len(words) >= 15:
-                    TOL = 5  # pt — words within 5pt vertically = same row
+                if words and len(words) >= 10:
+                    TOL = 4  # pt — words within 4pt vertically = same row
                     rows_by_y: dict = {}
                     for w in words:
                         y_key = round(w[1] / TOL) * TOL
-                        rows_by_y.setdefault(y_key, []).append((w[0], w[4]))
-                    sorted_rows = [
-                        [cell[1] for cell in sorted(cells, key=lambda c: c[0])]
-                        for _, cells in sorted(rows_by_y.items())
-                    ]
-                    if len(sorted_rows) >= 4:
-                        all_cells = [c for r in sorted_rows for c in r]
-                        avg_cols = sum(len(r) for r in sorted_rows) / len(sorted_rows)
-                        short_ratio = sum(1 for c in all_cells if len(c) <= 3) / max(len(all_cells), 1)
-                        # Wide table OR table with many short cells (x-markers, numbers)
-                        if avg_cols >= 6 or (avg_cols >= 3 and short_ratio >= 0.4):
-                            tables.append(sorted_rows)
+                        rows_by_y.setdefault(y_key, []).append(
+                            (w[0], w[2], w[4])  # x0, x1, word
+                        )
+                    y_sorted = sorted(rows_by_y.items())
+
+                    if len(y_sorted) >= 4:
+                        # Collect all word mid-X positions to find column gaps
+                        all_x = sorted((w[0]+w[2])/2 for w in words)
+                        gaps = [(all_x[i+1]-all_x[i], all_x[i+1])
+                                for i in range(len(all_x)-1)]
+                        if gaps:
+                            gap_vals = sorted(g[0] for g in gaps)
+                            median_gap = gap_vals[len(gap_vals)//2]
+                            # A "column gap" is at least 4× the median inter-word gap
+                            col_boundaries = [all_x[0]] + [
+                                x_after for size, x_after in gaps
+                                if size >= max(median_gap * 4, 8)
+                            ]
+                        else:
+                            col_boundaries = []
+
+                        if len(col_boundaries) >= 2:
+                            def _to_col(x_mid, bounds):
+                                for i in range(len(bounds)-1):
+                                    mid = (bounds[i] + bounds[i+1]) / 2
+                                    if x_mid < mid:
+                                        return i
+                                return len(bounds)-1
+
+                            structured: list = []
+                            for _, row_words in y_sorted:
+                                col_cells: dict = {}
+                                for x0, x1, word in row_words:
+                                    ci = _to_col((x0+x1)/2, col_boundaries)
+                                    col_cells.setdefault(ci, []).append(word)
+                                max_col = max(col_cells) if col_cells else 0
+                                row = [
+                                    " ".join(col_cells.get(i, []))
+                                    for i in range(max_col+1)
+                                ]
+                                row = [c.strip() for c in row if c.strip()]
+                                if len(row) >= 2:
+                                    structured.append(row)
+
+                            if len(structured) >= 4:
+                                all_c = [c for r in structured for c in r]
+                                short_r = sum(1 for c in all_c if len(c) <= 3) / max(len(all_c), 1)
+                                mw = sum(1 for c in all_c if " " in c) / max(len(all_c), 1)
+                                if short_r >= 0.3 or mw >= 0.1:
+                                    tables.append(structured)
             except Exception:
                 pass
 
-        # Method 3: Line-split fallback for x-marker grids with any spacing
+        # Method 3: Line-split fallback for x-marker grids.
+        # Splits lines by tabs OR 2+ spaces to preserve multi-word cells.
         if not tables:
             _XG = re.compile(r'\b[xX]\b.*\b[xX]\b.*\b[xX]\b', re.MULTILINE)
             if _XG.search(text):
                 raw_rows = []
                 for line in text.splitlines():
-                    parts = re.split(r'\s{2,}|\t', line.rstrip())
+                    # Split on one-or-more tabs OR two-or-more spaces
+                    parts = [p.strip() for p in re.split(r'\t+|\s{2,}', line.rstrip())
+                             if p.strip()]
                     if len(parts) >= 2:
                         raw_rows.append(parts)
                 if len(raw_rows) >= 3:
