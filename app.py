@@ -363,10 +363,10 @@ hr { border-color: var(--border2) !important; }
 .stAlert * { color: inherit !important; }
 
 /* ── Scrollbar ── */
-::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-track { background: var(--bg2); }
-::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--violet2); }
+::-webkit-scrollbar { width: 7px; }
+::-webkit-scrollbar-track { background: #ede9fe; border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: #7c3aed; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #6d28d9; }
 
 /* ── Dataframe toolbar ── */
 /* wrapper — no overflow:hidden so toolbar overlay is never clipped */
