@@ -1245,24 +1245,21 @@ def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
 def _domain_filter(query: str, chunks: list):
     """
     If the query names a CDISC domain, return only chunks containing that domain.
-    Searches chunk text, heading, AND table cells (edit check specs store the
-    domain code inside a 'Domain' column, not in running prose).
     Returns None when no domain is detected (caller keeps original list).
     """
-    matched_domain = _detect_domain(query)
+    q_upper = query.upper()
+    matched_domain = None
+    for d in _CDISC_DOMAINS:
+        if re.search(r'\b' + re.escape(d) + r'\b', q_upper):
+            matched_domain = d
+            break
     if not matched_domain:
         return None
     dom_re = re.compile(r'\b' + re.escape(matched_domain) + r'\b')
-    def _chunk_has_domain(c):
-        if dom_re.search(c.get("text", "")) or dom_re.search(c.get("heading", "")):
-            return True
-        # Also scan table cells — domain code often lives in a column, not prose
-        for t in c.get("tables", []):
-            for row in t:
-                if any(dom_re.search(str(cell)) for cell in row):
-                    return True
-        return False
-    hits = [c for c in chunks if _chunk_has_domain(c)]
+    hits = [
+        c for c in chunks
+        if dom_re.search(c.get("text", "")) or dom_re.search(c.get("heading", ""))
+    ]
     return hits if hits else None
 
 
@@ -2242,48 +2239,9 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
         # When user asks for a specific CDISC domain, keep only chunks that
         # mention that domain — prevents returning all domains from the file.
         _query_domain = _domain_in_q   # used for table-row filter below
-        if _query_domain:
-            # Hard scan: semantic search often misses domain-specific pages because
-            # "DM edit checks" and "AE edit checks" have similar embeddings.
-            # Scan ALL chunks in the matched document(s) for the domain code so we
-            # always find the right pages regardless of ranking.
-            _dom_scan_re = re.compile(r'\b' + re.escape(_query_domain) + r'\b')
-            _scan_pool = [
-                c for c in st.session_state.doc_chunks
-                if c["source"] in _matched_srcs
-            ] if _matched_srcs != {c["source"] for c in st.session_state.doc_chunks} else st.session_state.doc_chunks
-            def _chunk_has_domain_strict(c):
-                if _dom_scan_re.search(c.get("text", "")) or _dom_scan_re.search(c.get("heading", "")):
-                    return True
-                for t in c.get("tables", []):
-                    if not t:
-                        continue
-                    # Prefer Domain-column check to avoid cross-domain references
-                    _dcol = next(
-                        (i for i, cell in enumerate(t[0]) if _DOMAIN_COL_RE.match(str(cell))),
-                        None,
-                    )
-                    for row in t[1:]:
-                        if _dcol is not None:
-                            # Only check the Domain column cell
-                            if _dcol < len(row) and _dom_scan_re.search(str(row[_dcol])):
-                                return True
-                        else:
-                            if any(_dom_scan_re.search(str(cell)) for cell in row):
-                                return True
-                return False
-
-            _domain_chunks = [c for c in _scan_pool if _chunk_has_domain_strict(c)]
-            if _domain_chunks:
-                # Domain chunks become the authoritative source; keep semantic hits
-                # only as supplementary context for pages not already covered.
-                _dc_keys = {(c["source"], c["page"]) for c in _domain_chunks}
-                relevant = _domain_chunks + [c for c in relevant if (c["source"], c["page"]) not in _dc_keys]
-            # If hard scan found nothing, fall back to semantic results unchanged
-        else:
-            _domain_result = _domain_filter(pending, relevant)
-            if _domain_result is not None:
-                relevant = _domain_result or relevant
+        _domain_result = _domain_filter(pending, relevant)
+        if _domain_result is not None:
+            relevant = _domain_result or relevant
 
         context = build_context(relevant)
 
