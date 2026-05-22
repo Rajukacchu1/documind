@@ -2133,25 +2133,28 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
     </script>
     """, unsafe_allow_html=True)
 
-    # ── Query form (always rendered at bottom) ────────────────────────────────
-    _is_processing = bool(st.session_state.get("_pending_query"))
-    with st.form(key="query_form", clear_on_submit=True):
-        col_in, col_btn = st.columns([5, 1])
-        with col_in:
-            query = st.text_input(
-                "Ask a question",
-                placeholder="⏳ Processing…" if _is_processing else "What does the document say about…?",
-                label_visibility="collapsed",
-                disabled=_is_processing,
-            )
-        with col_btn:
-            submit = st.form_submit_button("Send ➤", use_container_width=True, disabled=_is_processing)
+    # ── Query form — only rendered when not processing ───────────────────────
+    # Cancel Query button is shown in the chat area above, so no disabled
+    # form is needed during processing. Rendering it causes a duplicate bar
+    # during the rerun transition when the old disabled form and new enabled
+    # form are both briefly visible.
+    if not st.session_state.get("_pending_query"):
+        with st.form(key="query_form", clear_on_submit=True):
+            col_in, col_btn = st.columns([5, 1])
+            with col_in:
+                query = st.text_input(
+                    "Ask a question",
+                    placeholder="What does the document say about…?",
+                    label_visibility="collapsed",
+                )
+            with col_btn:
+                submit = st.form_submit_button("Send ➤", use_container_width=True)
 
-    if submit and query.strip() and not _is_processing:
-        st.session_state.messages.append({"role": "user", "content": query.strip()})
-        st.session_state["_pending_query"] = query.strip()
-        st.session_state.pop("_awaiting_feedback", None)
-        st.rerun()
+        if submit and query.strip():
+            st.session_state.messages.append({"role": "user", "content": query.strip()})
+            st.session_state["_pending_query"] = query.strip()
+            st.session_state.pop("_awaiting_feedback", None)
+            st.rerun()
 
     # Process pending query (only runs when _pending_query is still set after the
     # Stop button check above — i.e., user did not click Stop on this rerun)
