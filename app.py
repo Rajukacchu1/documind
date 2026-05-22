@@ -1735,11 +1735,25 @@ else:
             st.markdown(f"""
             <div class="msg-bot">
                 <div class="avatar">🤖</div>
-                <div class="bubble">
+                <div class="bubble" id="ans-bubble-{_msg_idx}">
                     {answer_html}
                 </div>
             </div>
             """, unsafe_allow_html=True)
+
+            # Copy-to-clipboard button for this answer
+            _copy_raw = msg.get("content", answer_html)
+            _copy_safe = _copy_raw.replace("\\", "\\\\").replace("`", "'").replace("\n", " ").replace('"', '\\"')
+            st.markdown(
+                f'<button onclick="navigator.clipboard.writeText(document.getElementById('
+                f'&quot;ans-bubble-{_msg_idx}&quot;).innerText).then(function(){{this.textContent=\'✓ Copied!\';'
+                f'setTimeout(function(){{document.querySelector(\'[data-copy-idx=&quot;{_msg_idx}&quot;]\').textContent=\'📋 Copy Answer\'}},2000)}}.bind(this))" '
+                f'data-copy-idx="{_msg_idx}" '
+                f'style="background:rgba(100,70,220,.12);border:1px solid #8866ff;color:#000000;'
+                f'border-radius:6px;padding:3px 12px;cursor:pointer;font-size:.75rem;margin:4px 0 2px 52px;">'
+                f'📋 Copy Answer</button>',
+                unsafe_allow_html=True,
+            )
 
             # Inline images (page renders + classified doc images)
             if images:
@@ -1763,31 +1777,31 @@ else:
             # ── Feedback buttons (last assistant message only) ────────────────
             if _is_last and st.session_state.get("_awaiting_feedback"):
                 st.markdown("""<style>
-/* Yes — blue-purple */
+/* Yes — blue-purple, black text */
 div[data-testid="stHorizontalBlock"] > div:nth-child(1) button[data-testid="baseButton-secondary"] {
     background: rgba(70,130,220,.22) !important;
     border: 1.5px solid #6699ff !important;
-    color: #aabbff !important;
+    color: #000000 !important;
     font-weight: 700 !important;
 }
-/* Partially Correct — mid purple */
+/* Partially Correct — mid purple, black text */
 div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="baseButton-secondary"] {
     background: rgba(130,80,220,.22) !important;
     border: 1.5px solid #aa77ff !important;
-    color: #cc99ff !important;
+    color: #000000 !important;
     font-weight: 700 !important;
 }
-/* No — magenta-purple */
+/* No — magenta-purple, black text */
 div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="baseButton-secondary"] {
     background: rgba(200,60,180,.22) !important;
     border: 1.5px solid #dd55cc !important;
-    color: #ee88ee !important;
+    color: #000000 !important;
     font-weight: 700 !important;
 }
 </style>""", unsafe_allow_html=True)
                 st.markdown(
                     '<div style="display:flex;align-items:center;gap:10px;'
-                    'margin:6px 0 4px 0;font-size:.82rem;color:#9090b8;">'
+                    'margin:6px 0 4px 0;font-size:.82rem;color:#000000;font-weight:600;">'
                     'Is this information correct?</div>',
                     unsafe_allow_html=True,
                 )
@@ -1804,7 +1818,7 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                         st.rerun()
                 with _fb_col2:
                     if st.button("⚠️ Partially", key="fb_partial", use_container_width=True):
-                        # Save the partial answer AND retry for more detail
+                        # Save the partial answer AND retry — keep direct render path
                         _fq = st.session_state.pop("_feedback_query", "")
                         st.session_state.learned_answers.append({
                             "query":   _fq,
@@ -1814,7 +1828,7 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                         if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
                             st.session_state.messages.pop()
                         st.session_state["_pending_query"] = _fq
-                        st.session_state["_retry_mode"]    = True
+                        st.session_state["_retry_mode"]    = "partial"  # keeps use_direct=True
                         st.toast("Looking for more complete information…", icon="🔍")
                         st.rerun()
                 with _fb_col3:
@@ -1867,12 +1881,12 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
         st.markdown("""
         <style>
         .stop-row { display:flex; align-items:center; gap:12px; padding:8px 0; }
-        .stop-hint { font-size:.8rem; color:#9090b8; font-family:'Inter',sans-serif; }
+        .stop-hint { font-size:.8rem; color:#000000; font-family:'Inter',sans-serif; }
         /* Valid selector: data-testid is the real attribute Streamlit sets on buttons */
         button[data-testid="baseButton-secondary"] {
             background: rgba(100,70,220,.22) !important;
             border: 1.5px solid #8866ff !important;
-            color: #aa99ff !important;
+            color: #000000 !important;
             border-radius: 8px !important;
             font-weight: 700 !important;
             font-size: .88rem !important;
@@ -1912,6 +1926,27 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
             st.session_state.messages.append({"role": "user", "content": query.strip()})
             st.session_state["_pending_query"] = query.strip()
             st.rerun()
+
+        # ── Prompt utility bar: Copy last Q + Reload last Q ───────────────────
+        _last_user_q = next(
+            (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "user"),
+            ""
+        )
+        if _last_user_q:
+            _copy_q_safe = _last_user_q.replace('"', '\\"').replace("\n", " ").replace("`", "'")
+            _util_col1, _util_col2, _util_rest = st.columns([1.2, 1.2, 7.6])
+            with _util_col1:
+                st.markdown(
+                    f'<button onclick="navigator.clipboard.writeText(\"{_copy_q_safe}\").then(function(){{this.textContent=\'✓ Copied!\';setTimeout(()=>this.textContent=\'📋 Copy Q\',2000)}})"'
+                    f' style="background:rgba(100,70,220,.12);border:1px solid #8866ff;color:#000000;'
+                    f'border-radius:6px;padding:4px 14px;cursor:pointer;font-size:.78rem;width:100%;">'
+                    f'📋 Copy Q</button>',
+                    unsafe_allow_html=True,
+                )
+            with _util_col2:
+                if st.button("🔄 Reload Q", key="reload_last_q", help="Re-ask the last question"):
+                    st.session_state["_pending_query"] = _last_user_q
+                    st.rerun()
 
     # Process pending query (only runs when _pending_query is still set after the
     # Stop button check above — i.e., user did not click Stop on this rerun)
@@ -1987,7 +2022,9 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
         #   • query is explicitly for a table/schedule (_is_table_q), OR
         #   • query matches a section heading with ≥2 meaningful words
         # In retry mode (user said "No"), force the LLM path regardless of heading match
-        use_direct = (not _retry_mode) and (_is_table_q or best_hscore >= 2)
+        # "partial" retry keeps direct render (heading match still valid)
+        # boolean True retry (full No) forces LLM for a fresh interpretation
+        use_direct = (_retry_mode is not True) and (_is_table_q or best_hscore >= 2)
 
         if use_direct:
             # ── DIRECT RENDER — preserve document structure exactly ───────────
@@ -2003,6 +2040,15 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                     [c for c in relevant if c["_hscore"] >= 2],
                     key=lambda c: (-c["_hscore"], c["page"]),
                 )
+                # Include the page immediately after each matched heading so figures
+                # that appear below section text (or on the next page) are captured.
+                _rc_sp = {(c["source"], c["page"]) for c in render_chunks}
+                _rel_by_sp2 = {(c["source"], c["page"]): c for c in relevant}
+                for _rc in list(render_chunks):
+                    _sp_next = (_rc["source"], _rc["page"] + 1)
+                    if _sp_next not in _rc_sp and _sp_next in _rel_by_sp2:
+                        render_chunks.append(_rel_by_sp2[_sp_next])
+                        _rc_sp.add(_sp_next)
 
             # Classify each chunk by its dominant content type
             direct_tables:  list = []
