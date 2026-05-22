@@ -336,14 +336,17 @@ html, body { background-color: var(--bg) !important; }
     box-shadow: 0 8px 28px rgba(240,192,96,.45) !important;
 }
 
-/* ── Sticky query form — pinned to bottom of viewport ── */
+/* ── Query form fixed to bottom of viewport ── */
 [data-testid="stForm"] {
-    position: sticky !important;
+    position: fixed !important;
     bottom: 0 !important;
+    left: 21rem !important;   /* Streamlit sidebar default width */
+    right: 0 !important;
     z-index: 200 !important;
-    background: linear-gradient(180deg, transparent 0%, var(--bg) 28%) !important;
-    padding: 14px 0 10px !important;
-    margin-top: 1.2rem !important;
+    background: var(--bg) !important;
+    padding: 14px 2rem 12px !important;
+    border-top: 1px solid var(--border2) !important;
+    box-shadow: 0 -4px 24px rgba(0,0,0,.45) !important;
 }
 
 /* ── Tables ── */
