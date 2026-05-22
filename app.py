@@ -1208,13 +1208,15 @@ _DOMAIN_COL_RE = re.compile(r'^\s*domain\s*$', re.IGNORECASE)
 
 def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
     """
-    Keep only rows where any cell mentions the requested domain (or 'ALL').
+    Keep only the header row plus data rows whose Domain or Dataset column value
+    matches the requested domain (or 'ALL').
 
-    Guard: if a 'Domain' column exists and its value is a recognised CDISC code
-    for a *different* domain, the row is excluded regardless of other cells.
-    This prevents description-text cross-references (e.g. an AE row saying
-    "DM reference date") from appearing when the user asks for DM.
+    Checks two column types:
+    - 'Domain' column: used by Edit Check Spec tables (values like "DM", "AE")
+    - 'Dataset*' column: used by DRP tables where Domain col has descriptive names
+      ("Vitals") but the CDISC code ("VS") lives in Dataset / CRF Page column.
 
+    Falls back to whole-row search only when neither column type is found.
     Returns [header] only (no data rows) when nothing matches — caller skips
     via len < 2.
     """
@@ -1225,23 +1227,33 @@ def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
     dom_re = re.compile(r'\b' + re.escape(domain) + r'\b', re.IGNORECASE)
     all_re = re.compile(r'^\s*all\s*$', re.IGNORECASE)
 
+    def _cell_matches(val):
+        s = str(val)
+        return dom_re.search(s) or all_re.match(s)
+
     domain_col = next(
         (i for i, cell in enumerate(header) if _DOMAIN_COL_RE.match(str(cell))),
         None,
     )
+    # DRP-style tables: CDISC code lives in "Dataset / CRF Page" column
+    dataset_col = next(
+        (i for i, cell in enumerate(header)
+         if re.match(r'^\s*dataset\b', str(cell), re.IGNORECASE)),
+        None,
+    )
 
-    matched = []
-    for r in rows[1:]:
-        # Guard: if the Domain column holds a known CDISC code for a different
-        # domain, skip — avoids cross-reference false positives.
-        if domain_col is not None and domain_col < len(r):
-            v = str(r[domain_col]).strip().upper()
-            if v in _CDISC_DOMAINS and v != domain and not all_re.match(v):
-                continue
-
-        # Include if any cell in the row matches the requested domain or "ALL"
-        if any(dom_re.search(str(cell)) or all_re.match(str(cell)) for cell in r):
-            matched.append(r)
+    if domain_col is not None or dataset_col is not None:
+        matched = [
+            r for r in rows[1:]
+            if (
+                (domain_col is not None and domain_col < len(r) and _cell_matches(r[domain_col]))
+                or
+                (dataset_col is not None and dataset_col < len(r) and _cell_matches(r[dataset_col]))
+            )
+        ]
+    else:
+        # No explicit domain/dataset column — fall back to whole-row search
+        matched = [r for r in rows[1:] if any(dom_re.search(str(cell)) for cell in r)]
 
     return [header] + matched
 
