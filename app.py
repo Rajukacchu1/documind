@@ -336,17 +336,15 @@ html, body { background-color: var(--bg) !important; }
     box-shadow: 0 8px 28px rgba(240,192,96,.45) !important;
 }
 
-/* ── Query form fixed to bottom of viewport ── */
+/* ── Query form — inline, within normal page flow ── */
 [data-testid="stForm"] {
-    position: fixed !important;
-    bottom: 0 !important;
-    left: 21rem !important;   /* Streamlit sidebar default width */
-    right: 0 !important;
-    z-index: 200 !important;
-    background: var(--bg) !important;
-    padding: 14px 2rem 12px !important;
-    border-top: 1px solid var(--border2) !important;
-    box-shadow: 0 -4px 24px rgba(0,0,0,.45) !important;
+    position: static !important;
+    background: var(--surface2) !important;
+    padding: 14px 1.5rem 12px !important;
+    border: 1px solid var(--border2) !important;
+    border-radius: var(--radius) !important;
+    box-shadow: 0 2px 12px rgba(0,0,0,.35) !important;
+    margin-top: 0.5rem !important;
 }
 
 /* ── Tables ── */
@@ -566,7 +564,7 @@ header[data-testid="stHeader"] button:hover svg {
     fill: var(--gold) !important;
 }
 
-.block-container { padding-top: 1rem !important; padding-bottom: 5rem !important; }
+.block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
