@@ -480,22 +480,23 @@ hr { border-color: var(--border2) !important; }
     40%            { transform: scale(1.2); opacity: 1; }
 }
 
-/* ── Message action buttons (📋 📋 Copy, 🔄 Reload) — compact rectangles ── */
+/* ── Message action buttons (📋 Copy, 🔄 Reload) — compact rectangles ── */
 button[data-testid="baseButton-secondary"] {
     padding: 2px 8px !important;
     min-height: 30px !important;
     height: 30px !important;
     font-size: .8rem !important;
     border-radius: 5px !important;
-    background: rgba(100,70,220,.12) !important;
-    border: 1px solid rgba(136,102,255,.40) !important;
-    color: #000 !important;
+    background: #ede9fe !important;
+    border: 1.5px solid #7c3aed !important;
+    color: #3b0764 !important;
+    font-weight: 600 !important;
     line-height: 1 !important;
     white-space: nowrap !important;
 }
 button[data-testid="baseButton-secondary"]:hover {
-    background: rgba(100,70,220,.26) !important;
-    border-color: #8866ff !important;
+    background: #ddd6fe !important;
+    border-color: #6d28d9 !important;
 }
 
 /* ── Stop button — styled via dynamic injection in Python, not here ── */
@@ -1866,32 +1867,42 @@ else:
             # ── Feedback buttons (last assistant message only) ────────────────
             if _is_last and st.session_state.get("_awaiting_feedback"):
                 st.markdown("""<style>
-/* Yes — blue-purple, black text */
+/* Feedback row — solid backgrounds + white text: visible on any bg color */
 div[data-testid="stHorizontalBlock"] > div:nth-child(1) button[data-testid="baseButton-secondary"] {
-    background: rgba(70,130,220,.22) !important;
-    border: 1.5px solid #6699ff !important;
-    color: #000000 !important;
+    background: #2563eb !important;
+    border: none !important;
+    color: #ffffff !important;
     font-weight: 700 !important;
+    border-radius: 6px !important;
 }
-/* Partially Correct — mid purple, black text */
+div[data-testid="stHorizontalBlock"] > div:nth-child(1) button[data-testid="baseButton-secondary"]:hover {
+    background: #1d4ed8 !important;
+}
 div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="baseButton-secondary"] {
-    background: rgba(130,80,220,.22) !important;
-    border: 1.5px solid #aa77ff !important;
-    color: #000000 !important;
+    background: #7c3aed !important;
+    border: none !important;
+    color: #ffffff !important;
     font-weight: 700 !important;
+    border-radius: 6px !important;
 }
-/* No — magenta-purple, black text */
+div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="baseButton-secondary"]:hover {
+    background: #6d28d9 !important;
+}
 div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="baseButton-secondary"] {
-    background: rgba(200,60,180,.22) !important;
-    border: 1.5px solid #dd55cc !important;
-    color: #000000 !important;
+    background: #dc2626 !important;
+    border: none !important;
+    color: #ffffff !important;
     font-weight: 700 !important;
+    border-radius: 6px !important;
+}
+div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="baseButton-secondary"]:hover {
+    background: #b91c1c !important;
 }
 </style>""", unsafe_allow_html=True)
                 st.markdown(
                     '<div style="display:flex;align-items:center;gap:10px;'
-                    'margin:6px 0 4px 0;font-size:.82rem;color:#000000;font-weight:600;">'
-                    'Is this information correct?</div>',
+                    'margin:6px 0 6px 0;font-size:.85rem;color:#1e1b4b;font-weight:700;">'
+                    '🤔 Is this information correct?</div>',
                     unsafe_allow_html=True,
                 )
                 _fb_col1, _fb_col2, _fb_col3, _ = st.columns([1, 1.4, 1, 4.6])
@@ -1968,12 +1979,12 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
         st.markdown("""
         <style>
         .stop-row { display:flex; align-items:center; gap:12px; padding:8px 0; }
-        .stop-hint { font-size:.8rem; color:#000000; font-family:'Inter',sans-serif; }
-        /* Valid selector: data-testid is the real attribute Streamlit sets on buttons */
+        .stop-hint { font-size:.8rem; color:#1e1b4b; font-family:'Inter',sans-serif; font-weight:600; }
+        /* Stop button — solid so it's visible on any background */
         button[data-testid="baseButton-secondary"] {
-            background: rgba(100,70,220,.22) !important;
-            border: 1.5px solid #8866ff !important;
-            color: #000000 !important;
+            background: #7c3aed !important;
+            border: none !important;
+            color: #ffffff !important;
             border-radius: 8px !important;
             font-weight: 700 !important;
             font-size: .88rem !important;
@@ -1982,8 +1993,8 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
             transition: background .2s, box-shadow .2s !important;
         }
         button[data-testid="baseButton-secondary"]:hover {
-            background: rgba(100,70,220,.40) !important;
-            box-shadow: 0 0 12px rgba(100,70,220,.45) !important;
+            background: #6d28d9 !important;
+            box-shadow: 0 0 12px rgba(109,40,217,.5) !important;
         }
         </style>
         <div class="stop-row">
