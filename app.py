@@ -1208,13 +1208,15 @@ _DOMAIN_COL_RE = re.compile(r'^\s*domain\s*$', re.IGNORECASE)
 
 def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
     """
-    Keep only the header row plus data rows whose **Domain column** value matches
-    the requested domain (or 'ALL').
+    Keep only the header row plus data rows whose Domain or Dataset column value
+    matches the requested domain (or 'ALL').
 
-    Column-aware: scans the header for a 'Domain' column and filters on that
-    column only.  A previous whole-row scan caused AE rows with cross-domain
-    references like 'AE date >= DM consent date' to appear when asking for DM.
+    Checks two column types:
+    - 'Domain' column: used by Edit Check Spec tables (values like "DM", "AE")
+    - 'Dataset*' column: used by DRP tables where Domain col has descriptive names
+      ("Vitals") but the CDISC code ("VS") lives in Dataset / CRF Page column.
 
+    Falls back to whole-row search only when neither column type is found.
     Returns [header] only (no data rows) when nothing matches — caller skips
     via len < 2.
     """
@@ -1223,26 +1225,34 @@ def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
 
     header = rows[0]
     dom_re = re.compile(r'\b' + re.escape(domain) + r'\b', re.IGNORECASE)
+    all_re = re.compile(r'^\s*all\s*$', re.IGNORECASE)
 
-    # Find the index of the Domain column in the header
+    def _cell_matches(val):
+        s = str(val)
+        return dom_re.search(s) or all_re.match(s)
+
     domain_col = next(
         (i for i, cell in enumerate(header) if _DOMAIN_COL_RE.match(str(cell))),
         None,
     )
+    # DRP-style tables: CDISC code lives in "Dataset / CRF Page" column
+    dataset_col = next(
+        (i for i, cell in enumerate(header)
+         if re.match(r'^\s*dataset\b', str(cell), re.IGNORECASE)),
+        None,
+    )
 
-    if domain_col is not None:
-        # Strict: only match rows where the Domain column is exactly the
-        # requested domain OR "ALL" (cross-domain checks apply everywhere)
-        all_re = re.compile(r'^\s*all\s*$', re.IGNORECASE)
+    if domain_col is not None or dataset_col is not None:
         matched = [
             r for r in rows[1:]
-            if domain_col < len(r) and (
-                dom_re.search(str(r[domain_col]))
-                or all_re.match(str(r[domain_col]))
+            if (
+                (domain_col is not None and domain_col < len(r) and _cell_matches(r[domain_col]))
+                or
+                (dataset_col is not None and dataset_col < len(r) and _cell_matches(r[dataset_col]))
             )
         ]
     else:
-        # No explicit Domain column — fall back to whole-row search
+        # No explicit domain/dataset column — fall back to whole-row search
         matched = [r for r in rows[1:] if any(dom_re.search(str(cell)) for cell in r)]
 
     return [header] + matched
@@ -2498,6 +2508,27 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                                  table_query=_is_table_q)
             thinking_slot.empty()
             answer_html, _, extra_tables = render_answer(raw_answer, relevant)
+
+            # Apply domain filter and dedup-merge for LLM-path tables
+            if _query_domain and extra_tables:
+                _dom_filtered = []
+                for _et, _es, _ep in extra_tables:
+                    _tf = _filter_table_rows_by_domain(_et, _query_domain)
+                    if len(_tf) >= 2:
+                        _dom_filtered.append((_tf, _es, _ep))
+                if _dom_filtered:
+                    extra_tables = _dom_filtered
+                    if len(extra_tables) > 1:
+                        _mh = extra_tables[0][0][0]
+                        _mr, _sk = [], set()
+                        for _et, _es, _ep in extra_tables:
+                            for _row in _et[1:]:
+                                _k = tuple(str(c).strip() for c in _row)
+                                if _k not in _sk:
+                                    _mr.append(_row)
+                                    _sk.add(_k)
+                        if _mr:
+                            extra_tables = [([_mh] + _mr, extra_tables[0][1], extra_tables[0][2])]
 
             sources = list({f"{c['source']} p.{c['page']}" for c in relevant})
             st.session_state.messages.append({
