@@ -581,7 +581,9 @@ if "loaded_files" not in st.session_state:
 if "doc_pdf_bytes" not in st.session_state:
     st.session_state.doc_pdf_bytes = {}   # filename → raw PDF bytes for page rendering
 if "page_img_cache" not in st.session_state:
-    st.session_state.page_img_cache = {}  # (filename, page_num) → base64 PNG
+    st.session_state.page_img_cache = {}  # (filename, page_num, mode) → base64 PNG
+if "learned_answers" not in st.session_state:
+    st.session_state.learned_answers = [] # [{query, message}] saved on user confirmation
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -750,14 +752,19 @@ def _heading_match(query: str, heading: str) -> int:
     return count
 
 
-def get_page_image(filename: str, page_num: int) -> str | None:
+def get_table_image(filename: str, page_num: int, heading_hint: str = "") -> str | None:
     """
-    Render a PDF page as a base64 PNG and return it.
-    This shows the page EXACTLY as it appears in the document — tables,
-    images, and text all preserved in their original layout.
-    Results are cached in session state to avoid re-rendering.
+    Render ONLY the relevant table/section from a PDF page, not the whole page.
+
+    Strategy (in order):
+    1. find_tables() — if a structured table is detected, crop to its exact bbox.
+    2. Text search — search for the heading_hint or "Table" keyword; crop from
+       that Y position downward (captures borderless tables).
+    3. Full page fallback — if neither works, render the whole page.
+
+    All results are cached by (filename, page_num, hint[:20]).
     """
-    cache_key = (filename, page_num)
+    cache_key = (filename, page_num, heading_hint[:20])
     cached = st.session_state.page_img_cache.get(cache_key)
     if cached:
         return cached
@@ -765,10 +772,53 @@ def get_page_image(filename: str, page_num: int) -> str | None:
     if not pdf_bytes or not PYMUPDF_OK:
         return None
     try:
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        doc  = fitz.open(stream=pdf_bytes, filetype="pdf")
         page = doc[page_num - 1]
-        mat = fitz.Matrix(1.8, 1.8)   # ~130 DPI — readable without being huge
-        pix = page.get_pixmap(matrix=mat, alpha=False)
+        rect = page.rect
+        clip = None
+
+        # Strategy 1: structural table bbox via find_tables()
+        try:
+            tbl_list = page.find_tables()
+            if tbl_list.tables:
+                # Pick the largest table on the page (most likely the schedule)
+                best = max(
+                    tbl_list.tables,
+                    key=lambda t: (t.bbox[2]-t.bbox[0]) * (t.bbox[3]-t.bbox[1])
+                )
+                b = best.bbox
+                pad = 20
+                clip = fitz.Rect(
+                    max(0, b[0]-pad), max(0, b[1]-pad),
+                    min(rect.width, b[2]+pad), min(rect.height, b[3]+pad)
+                )
+        except Exception:
+            pass
+
+        # Strategy 2: search for the table heading text to find start Y
+        if clip is None:
+            search_terms = []
+            if heading_hint:
+                # Use first few meaningful words of the heading
+                words = [w for w in heading_hint.split() if len(w) > 3][:4]
+                if words:
+                    search_terms.append(" ".join(words[:2]))
+            search_terms.append("Table")   # generic fallback
+            for term in search_terms:
+                hits = page.search_for(term)
+                if hits:
+                    top_y = min(r.y0 for r in hits)
+                    clip = fitz.Rect(0, max(0, top_y - 8), rect.width, rect.height)
+                    break
+
+        # Render — crop when we have a clip, otherwise full page at lower DPI
+        if clip:
+            mat = fitz.Matrix(2.2, 2.2)   # 158 DPI — sharp for reading small text
+            pix = page.get_pixmap(matrix=mat, clip=clip, alpha=False)
+        else:
+            mat = fitz.Matrix(1.6, 1.6)
+            pix = page.get_pixmap(matrix=mat, alpha=False)
+
         b64 = base64.b64encode(pix.tobytes("png")).decode()
         doc.close()
         st.session_state.page_img_cache[cache_key] = b64
@@ -1483,6 +1533,10 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.doc_pdf_bytes = {}
         st.session_state.page_img_cache = {}
+        st.session_state.learned_answers = []
+        st.session_state.pop("_awaiting_feedback", None)
+        st.session_state.pop("_feedback_query", None)
+        st.session_state.pop("_retry_mode", None)
         st.rerun()
 
     if load_btn:
@@ -1630,7 +1684,8 @@ if not st.session_state.doc_chunks:
 else:
     # Chat history
     st.markdown('<div class="chat-wrap">', unsafe_allow_html=True)
-    for msg in st.session_state.messages:
+    for _msg_idx, msg in enumerate(st.session_state.messages):
+        _is_last = _msg_idx == len(st.session_state.messages) - 1
         if msg["role"] == "user":
             st.markdown(f'<div class="msg-user"><div class="bubble">{msg["content"]}</div></div>', unsafe_allow_html=True)
         else:
@@ -1647,18 +1702,16 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            # Inline images
+            # Inline images (page renders + classified doc images)
             if images:
-                cols = st.columns(min(len(images), 3))
-                for i, (b64, src, page) in enumerate(images):
-                    with cols[i % 3]:
-                        st.image(
-                            base64.b64decode(b64),
-                            caption=f"{src} – p.{page}",
-                            use_container_width=True,
-                        )
+                for b64, src, page in images:
+                    st.image(
+                        base64.b64decode(b64),
+                        caption=f"{src} – p.{page}",
+                        use_container_width=True,
+                    )
 
-            # Extra tables — plain Streamlit dataframe
+            # Structured tables — plain Streamlit dataframe
             for (t, src, page) in tables:
                 if t and len(t) > 1:
                     try:
@@ -1667,6 +1720,38 @@ else:
                         st.dataframe(df, use_container_width=True)
                     except Exception:
                         st.markdown(table_to_html(t), unsafe_allow_html=True)
+
+            # ── Feedback buttons (last assistant message only) ────────────────
+            if _is_last and st.session_state.get("_awaiting_feedback"):
+                st.markdown(
+                    '<div style="display:flex;align-items:center;gap:10px;'
+                    'margin:6px 0 4px 0;font-size:.82rem;color:#9090b8;">Is this information correct?</div>',
+                    unsafe_allow_html=True,
+                )
+                _fb_col1, _fb_col2, _fb_rest = st.columns([1, 1, 6])
+                with _fb_col1:
+                    if st.button("✅ Yes", key="fb_yes", use_container_width=True):
+                        # Save this Q&A so future similar questions get the same answer
+                        _fq = st.session_state.pop("_feedback_query", "")
+                        st.session_state.learned_answers.append({
+                            "query":   _fq,
+                            "message": dict(msg),
+                        })
+                        st.session_state.pop("_awaiting_feedback", None)
+                        st.toast("Saved! I'll use this answer for similar questions.", icon="✅")
+                        st.rerun()
+                with _fb_col2:
+                    if st.button("❌ No", key="fb_no", use_container_width=True):
+                        # Remove the incorrect answer and retry via LLM path
+                        _fq = st.session_state.pop("_feedback_query", "")
+                        st.session_state.pop("_awaiting_feedback", None)
+                        # Remove last assistant message
+                        if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
+                            st.session_state.messages.pop()
+                        # Re-queue with retry flag (forces LLM path)
+                        st.session_state["_pending_query"] = _fq
+                        st.session_state["_retry_mode"]    = True
+                        st.rerun()
 
     # Thinking indicator + Stop button — shown while query is pending
     thinking_slot = st.empty()
@@ -1759,6 +1844,25 @@ else:
     if st.session_state.get("_pending_query"):
         from collections import Counter
         pending = st.session_state.pop("_pending_query")
+        _retry_mode = st.session_state.pop("_retry_mode", False)
+
+        # ── Check learned answers first ───────────────────────────────────────
+        # If we previously confirmed a correct answer for a similar question,
+        # replay it immediately without going to retrieval.
+        _served_from_learned = False
+        for la in st.session_state.learned_answers:
+            if _heading_match(pending, la["query"]) >= 2:
+                msg = dict(la["message"])   # shallow copy so we don't mutate stored
+                st.session_state.messages.append(msg)
+                st.session_state["_awaiting_feedback"] = True
+                st.session_state["_feedback_query"]    = pending
+                thinking_slot.empty()
+                _served_from_learned = True
+                st.rerun()
+                break
+
+        if _served_from_learned:
+            st.stop()
         _is_table_q = bool(re.search(
             r'\b(assessment\s+schedule|schedule\s+of\s+assessments?|'
             r'visit\s+schedule|time\s+and\s+events?|'
@@ -1808,7 +1912,8 @@ else:
         # Direct render when:
         #   • query is explicitly for a table/schedule (_is_table_q), OR
         #   • query matches a section heading with ≥2 meaningful words
-        use_direct = _is_table_q or best_hscore >= 2
+        # In retry mode (user said "No"), force the LLM path regardless of heading match
+        use_direct = (not _retry_mode) and (_is_table_q or best_hscore >= 2)
 
         if use_direct:
             # ── DIRECT RENDER — preserve document structure exactly ───────────
@@ -1843,10 +1948,10 @@ else:
                         seen_pages.add(page_key)
                         direct_tables.append((t, src, pg))
 
-                # ── No structured table → render the PDF page as an image ──
-                # This shows the content EXACTLY as it appears in the document.
+                # ── No structured table → render just the table/section area ──
                 if page_key not in seen_pages and src.lower().endswith(".pdf"):
-                    img_b64 = get_page_image(src, pg)
+                    hint = c.get("heading", "") or pending
+                    img_b64 = get_table_image(src, pg, heading_hint=hint)
                     if img_b64:
                         seen_pages.add(page_key)
                         direct_images.append((img_b64, src, pg))
@@ -1897,6 +2002,8 @@ else:
                 "tables": direct_tables,
                 "sources": sources,
             })
+            st.session_state["_awaiting_feedback"] = True
+            st.session_state["_feedback_query"]    = pending
 
         else:
             # ── LLM PATH — open-ended questions with no strong heading match ──
@@ -1938,6 +2045,8 @@ else:
                 "tables": extra_tables + img_tables,
                 "sources": sources,
             })
+            st.session_state["_awaiting_feedback"] = True
+            st.session_state["_feedback_query"]    = pending
 
         st.rerun()
 
