@@ -1236,8 +1236,13 @@ def retrieve(query: str, chunks, embeddings, top_k=5):
             return has_table + has_xgrid
 
         anchor_pages = sorted(anchor_pages, key=_anchor_score, reverse=True)
-        for src, page in anchor_pages[:2]:
-            for offset in range(-1, 9):
+        TOC_RE = re.compile(r'\.{3,}\s*\d+', re.MULTILINE)
+        for src, page in anchor_pages[:3]:
+            chunk = by_src_page.get((src, page))
+            # TOC pages list sections with "......N" dot-leaders — detect and use wider range
+            is_toc = bool(chunk and TOC_RE.search(chunk.get("text", "")))
+            fwd = 15 if is_toc else 9
+            for offset in range(-1, fwd):
                 key = (src, page + offset)
                 if key in by_src_page and key not in seen_keys:
                     result.append(by_src_page[key])
@@ -1723,6 +1728,20 @@ else:
 
             # ── Feedback buttons (last assistant message only) ────────────────
             if _is_last and st.session_state.get("_awaiting_feedback"):
+                st.markdown("""<style>
+div[data-testid="stHorizontalBlock"] > div:nth-child(1) button[data-testid="baseButton-secondary"] {
+    background: rgba(64,200,128,.18) !important;
+    border: 1.5px solid #40c880 !important;
+    color: #40c880 !important;
+    font-weight: 700 !important;
+}
+div[data-testid="stHorizontalBlock"] > div:nth-child(2) button[data-testid="baseButton-secondary"] {
+    background: rgba(220,50,50,.22) !important;
+    border: 1.5px solid #ff5555 !important;
+    color: #ff7070 !important;
+    font-weight: 700 !important;
+}
+</style>""", unsafe_allow_html=True)
                 st.markdown(
                     '<div style="display:flex;align-items:center;gap:10px;'
                     'margin:6px 0 4px 0;font-size:.82rem;color:#9090b8;">Is this information correct?</div>',
@@ -1870,7 +1889,7 @@ else:
             pending, re.IGNORECASE
         ))
         relevant = retrieve(pending, st.session_state.doc_chunks, st.session_state.embeddings,
-                            top_k=8 if _is_table_q else 5)
+                            top_k=15 if _retry_mode else (8 if _is_table_q else 5))
 
         # ── Hard document filter ──────────────────────────────────────────────
         # Re-run _doc_filter to find which documents the query refers to.
