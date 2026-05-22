@@ -2376,9 +2376,9 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                         seen_pages.add(page_key)
                         direct_texts.append((c["text"].strip(), src, pg))
 
-            # When a domain was requested, merge all filtered tables into one
-            # so the user sees a single combined table instead of many small ones.
-            if _query_domain and len(direct_tables) > 1:
+            # Merge multi-page tables into one — applies to both domain queries and
+            # schedule/table queries where the same table spans multiple pages.
+            if (_query_domain or _is_table_q) and len(direct_tables) > 1:
                 _merged_header = direct_tables[0][0][0]   # header row from first table
                 _merged_rows = []
                 _seen_row_keys: set = set()
