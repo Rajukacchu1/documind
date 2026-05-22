@@ -1198,17 +1198,47 @@ def _detect_domain(query: str) -> str | None:
     return None
 
 
+_DOMAIN_COL_RE = re.compile(r'^\s*domain\s*$', re.IGNORECASE)
+
 def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
     """
-    Keep only the header row plus data rows that contain the domain code in any cell.
-    Returns [header] only (no data rows) when nothing matches — caller skips via len < 2.
-    Never falls back to returning all rows, which would show wrong-domain content.
+    Keep only the header row plus data rows whose **Domain column** value matches
+    the requested domain (or 'ALL').
+
+    Column-aware: scans the header for a 'Domain' column and filters on that
+    column only.  A previous whole-row scan caused AE rows with cross-domain
+    references like 'AE date >= DM consent date' to appear when asking for DM.
+
+    Returns [header] only (no data rows) when nothing matches — caller skips
+    via len < 2.
     """
     if not rows or len(rows) < 2:
         return rows
-    dom_re = re.compile(r'\b' + re.escape(domain) + r'\b', re.IGNORECASE)
+
     header = rows[0]
-    matched = [r for r in rows[1:] if any(dom_re.search(str(cell)) for cell in r)]
+    dom_re = re.compile(r'\b' + re.escape(domain) + r'\b', re.IGNORECASE)
+
+    # Find the index of the Domain column in the header
+    domain_col = next(
+        (i for i, cell in enumerate(header) if _DOMAIN_COL_RE.match(str(cell))),
+        None,
+    )
+
+    if domain_col is not None:
+        # Strict: only match rows where the Domain column is exactly the
+        # requested domain OR "ALL" (cross-domain checks apply everywhere)
+        all_re = re.compile(r'^\s*all\s*$', re.IGNORECASE)
+        matched = [
+            r for r in rows[1:]
+            if domain_col < len(r) and (
+                dom_re.search(str(r[domain_col]))
+                or all_re.match(str(r[domain_col]))
+            )
+        ]
+    else:
+        # No explicit Domain column — fall back to whole-row search
+        matched = [r for r in rows[1:] if any(dom_re.search(str(cell)) for cell in r)]
+
     return [header] + matched
 
 
@@ -1552,19 +1582,24 @@ def ask_llm(query: str, context: str, vision_images: list = None, table_query: b
         _domain_rule = ""
         _domain_instr = ""
         if _detected_domain:
+            _other_domains = ", ".join(
+                d for d in ["DM","AE","VS","LB","CM","EX","DS","MH","SU","EG","PE","SC"]
+                if d != _detected_domain
+            )
             _domain_rule = (
                 f"\nDOMAIN FILTER (critical):\n"
                 f"- The user is asking specifically about the **{_detected_domain}** domain.\n"
-                f"- Output ONLY the edit checks / rules / fields / information that belong to "
-                f"  the {_detected_domain} domain section.\n"
-                f"- COMPLETELY IGNORE edit checks or information for any other domain "
-                f"  (AE, VS, LB, CM, DM, EX, DS, MH, etc.) even if they appear in the context.\n"
-                f"- If the {_detected_domain} domain section is not found, say: "
+                f"- Output ONLY the edit checks / rules / fields / information whose "
+                f"  Domain column value is '{_detected_domain}' or 'ALL'.\n"
+                f"- COMPLETELY IGNORE rows whose Domain column is any other value "
+                f"  ({_other_domains}, etc.) even if they mention {_detected_domain} "
+                f"  in a description or cross-reference field.\n"
+                f"- If no {_detected_domain} domain rows are found, say: "
                 f"  'No {_detected_domain} domain information found in the document.'\n"
             )
             _domain_instr = (
-                f" Output ONLY the {_detected_domain} domain section — "
-                f"skip every other domain completely."
+                f" Output ONLY rows where Domain='{_detected_domain}' or Domain='ALL' — "
+                f"skip every other domain row completely."
             )
 
         system = (
@@ -2217,17 +2252,28 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                 c for c in st.session_state.doc_chunks
                 if c["source"] in _matched_srcs
             ] if _matched_srcs != {c["source"] for c in st.session_state.doc_chunks} else st.session_state.doc_chunks
-            _domain_chunks = [
-                c for c in _scan_pool
-                if _dom_scan_re.search(c.get("text", ""))
-                or _dom_scan_re.search(c.get("heading", ""))
-                or any(
-                    _dom_scan_re.search(str(cell))
-                    for t in c.get("tables", [])
-                    for row in t
-                    for cell in row
-                )
-            ]
+            def _chunk_has_domain_strict(c):
+                if _dom_scan_re.search(c.get("text", "")) or _dom_scan_re.search(c.get("heading", "")):
+                    return True
+                for t in c.get("tables", []):
+                    if not t:
+                        continue
+                    # Prefer Domain-column check to avoid cross-domain references
+                    _dcol = next(
+                        (i for i, cell in enumerate(t[0]) if _DOMAIN_COL_RE.match(str(cell))),
+                        None,
+                    )
+                    for row in t[1:]:
+                        if _dcol is not None:
+                            # Only check the Domain column cell
+                            if _dcol < len(row) and _dom_scan_re.search(str(row[_dcol])):
+                                return True
+                        else:
+                            if any(_dom_scan_re.search(str(cell)) for cell in row):
+                                return True
+                return False
+
+            _domain_chunks = [c for c in _scan_pool if _chunk_has_domain_strict(c)]
             if _domain_chunks:
                 # Domain chunks become the authoritative source; keep semantic hits
                 # only as supplementary context for pages not already covered.
