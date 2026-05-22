@@ -1203,29 +1203,38 @@ def _detect_domain(query: str) -> str | None:
 def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
     """
     Keep only the header row plus data rows that contain the domain code in any cell.
-    Returns the original rows unchanged when no domain rows are found.
+    Returns [header] only (no data rows) when nothing matches — caller skips via len < 2.
+    Never falls back to returning all rows, which would show wrong-domain content.
     """
     if not rows or len(rows) < 2:
         return rows
     dom_re = re.compile(r'\b' + re.escape(domain) + r'\b', re.IGNORECASE)
     header = rows[0]
     matched = [r for r in rows[1:] if any(dom_re.search(str(cell)) for cell in r)]
-    return [header] + matched if matched else rows
+    return [header] + matched
 
 
 def _domain_filter(query: str, chunks: list):
     """
     If the query names a CDISC domain, return only chunks containing that domain.
+    Searches chunk text, heading, AND table cells (edit check specs store the
+    domain code inside a 'Domain' column, not in running prose).
     Returns None when no domain is detected (caller keeps original list).
     """
     matched_domain = _detect_domain(query)
     if not matched_domain:
         return None
     dom_re = re.compile(r'\b' + re.escape(matched_domain) + r'\b')
-    hits = [
-        c for c in chunks
-        if dom_re.search(c.get("text", "")) or dom_re.search(c.get("heading", ""))
-    ]
+    def _chunk_has_domain(c):
+        if dom_re.search(c.get("text", "")) or dom_re.search(c.get("heading", "")):
+            return True
+        # Also scan table cells — domain code often lives in a column, not prose
+        for t in c.get("tables", []):
+            for row in t:
+                if any(dom_re.search(str(cell)) for cell in row):
+                    return True
+        return False
+    hits = [c for c in chunks if _chunk_has_domain(c)]
     return hits if hits else None
 
 
@@ -2176,8 +2185,9 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
             r'procedures?\s+and\s+assessments?)\b',
             pending, re.IGNORECASE
         ))
+        _domain_in_q = _detect_domain(pending)
         relevant = retrieve(pending, st.session_state.doc_chunks, st.session_state.embeddings,
-                            top_k=15 if _retry_mode else (8 if _is_table_q else 5))
+                            top_k=15 if _retry_mode else (12 if _domain_in_q else (8 if _is_table_q else 5)))
 
         # ── Hard document filter ──────────────────────────────────────────────
         # Re-run _doc_filter to find which documents the query refers to.
@@ -2195,7 +2205,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
         # ── Domain filter (DM, VS, AE, etc.) ─────────────────────────────────
         # When user asks for a specific CDISC domain, keep only chunks that
         # mention that domain — prevents returning all domains from the file.
-        _query_domain = _detect_domain(pending)   # used for table-row filter below
+        _query_domain = _domain_in_q   # used for table-row filter below
         _domain_result = _domain_filter(pending, relevant)
         if _domain_result is not None:
             relevant = _domain_result or relevant
