@@ -2198,9 +2198,18 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
         # ── Check learned answers first ───────────────────────────────────────
         # If we previously confirmed a correct answer for a similar question,
         # replay it immediately without going to retrieval.
+        # Guard: if both the pending query and the learned query name a CDISC
+        # domain, they must name the SAME domain — otherwise "CM domain edit
+        # checks" would incorrectly serve the cached "DM domain edit checks"
+        # answer (both score ≥ 2 on shared words domain/edit/checks because
+        # 2-char codes are invisible to _heading_match).
         _served_from_learned = False
+        _pending_domain = _detect_domain(pending)
         for la in st.session_state.learned_answers:
             if _heading_match(pending, la["query"]) >= 2:
+                _la_domain = _detect_domain(la.get("query", ""))
+                if _pending_domain and _la_domain and _pending_domain != _la_domain:
+                    continue   # different domain — do not serve this cached answer
                 msg = dict(la["message"])   # shallow copy so we don't mutate stored
                 st.session_state.messages.append(msg)
                 st.session_state["_awaiting_feedback"] = True
@@ -2392,15 +2401,16 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                     direct_tables = [([_merged_header] + _merged_rows, direct_tables[0][1], direct_tables[0][2])]
 
             # Build the answer bubble — minimal heading + source info only
+            # Always derive heading from the user's own query for domain queries:
+            # chunk headings often reflect a different domain (e.g. "AE Domain
+            # Edit Checks" stored in the doc when the user asked for CM).
+            _q_domain_for_hdr = _query_domain or _detect_domain(pending)
             top_heading = ""
-            if _query_domain:
-                # For domain queries the chunk heading often reflects a different domain
-                # (e.g. "AE Domain Edit Checks" when user asked for DM).
-                # Use the user's query as the heading, with the domain code uppercased.
+            if _q_domain_for_hdr:
                 _th = pending.strip().title()
                 top_heading = re.sub(
-                    r'\b' + re.escape(_query_domain.title()) + r'\b',
-                    _query_domain.upper(), _th
+                    r'\b' + re.escape(_q_domain_for_hdr.title()) + r'\b',
+                    _q_domain_for_hdr.upper(), _th
                 )
             elif render_chunks:
                 best = max(render_chunks, key=lambda c: c["_hscore"])
