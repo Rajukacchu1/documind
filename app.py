@@ -336,6 +336,57 @@ html, body { background-color: var(--bg) !important; }
     box-shadow: 0 8px 28px rgba(240,192,96,.45) !important;
 }
 
+/* ── Chat input bar (bottom of viewport) ── */
+/* Backdrop fade so the bar blends into the app background */
+[data-testid="stBottom"] {
+    background: linear-gradient(180deg, transparent 0%, var(--bg) 35%) !important;
+    padding: 6px 0 4px !important;
+}
+/* Outer container */
+[data-testid="stChatInput"] {
+    background: var(--surface2) !important;
+    border: 1.5px solid var(--border2) !important;
+    border-radius: var(--radius-lg) !important;
+    transition: border-color .25s, box-shadow .25s !important;
+}
+[data-testid="stChatInput"]:focus-within {
+    border-color: var(--violet) !important;
+    background: var(--surface3) !important;
+    box-shadow: 0 0 0 4px rgba(157,111,255,.15), 0 4px 20px rgba(157,111,255,.12) !important;
+}
+/* Text area inside */
+[data-testid="stChatInputTextArea"] {
+    background: transparent !important;
+    color: var(--text) !important;
+    caret-color: var(--violet) !important;
+    font-family: 'Inter', sans-serif !important;
+    font-size: 0.95rem !important;
+}
+[data-testid="stChatInputTextArea"]::placeholder {
+    color: var(--text-dim) !important;
+    opacity: 1 !important;
+}
+/* Send button — gold gradient matching old Send ➤ button */
+[data-testid="stChatInputSubmitButton"] > button {
+    background: linear-gradient(135deg, var(--gold2) 0%, var(--gold) 100%) !important;
+    color: #0a0a0f !important;
+    border: none !important;
+    border-radius: var(--radius) !important;
+    font-weight: 700 !important;
+    box-shadow: 0 2px 10px rgba(240,192,96,.35) !important;
+    transition: all .2s !important;
+}
+[data-testid="stChatInputSubmitButton"] > button:hover {
+    box-shadow: 0 4px 18px rgba(240,192,96,.55) !important;
+    transform: scale(1.06) !important;
+}
+/* SVG arrow icon inside send button — keep it dark to stay readable on gold */
+[data-testid="stChatInputSubmitButton"] > button svg,
+[data-testid="stChatInputSubmitButton"] > button svg * {
+    fill: #0a0a0f !important;
+    stroke: #0a0a0f !important;
+}
+
 /* ── Tables ── */
 .msg-bot .bubble table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 0.85rem; }
 .msg-bot .bubble th {
