@@ -1779,6 +1779,20 @@ else:
         _is_last = _msg_idx == len(st.session_state.messages) - 1
         if msg["role"] == "user":
             st.markdown(f'<div class="msg-user"><div class="bubble">{msg["content"]}</div></div>', unsafe_allow_html=True)
+            # Copy / Reload buttons just below the user query
+            _q_text = msg["content"]
+            _qc1, _qc2, _ = st.columns([0.6, 0.7, 8.7])
+            with _qc1:
+                if st.button("📋 Copy", key=f"copy_q_{_msg_idx}", use_container_width=True):
+                    _ck = f"_show_copy_q_{_msg_idx}"
+                    st.session_state[_ck] = not st.session_state.get(_ck, False)
+            with _qc2:
+                if st.button("🔄 Reload", key=f"reload_q_{_msg_idx}", use_container_width=True,
+                             help="Re-ask this question"):
+                    st.session_state["_pending_query"] = _q_text
+                    st.rerun()
+            if st.session_state.get(f"_show_copy_q_{_msg_idx}"):
+                st.code(_q_text, language=None)
         else:
             answer_html = msg.get("answer_html", msg["content"])
             images = msg.get("images", [])
@@ -1847,7 +1861,7 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                     'Is this information correct?</div>',
                     unsafe_allow_html=True,
                 )
-                _fb_col1, _fb_col2, _fb_col3, _fb_rest = st.columns([1, 1.4, 1, 4.6])
+                _fb_col1, _fb_col2, _fb_col3, _ = st.columns([1, 1.4, 1, 4.6])
                 with _fb_col1:
                     if st.button("✅ Yes", key="fb_yes", use_container_width=True):
                         _fq = st.session_state.pop("_feedback_query", "")
@@ -1961,30 +1975,8 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
             with col_btn:
                 submit = st.form_submit_button("Send ➤", use_container_width=True)
 
-        # ── Utility bar — always just below the prompt ────────────────────────
-        _last_user_q = next(
-            (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "user"),
-            ""
-        )
-        _util_col1, _util_col2, _util_rest = st.columns([1, 1, 8])
-        with _util_col1:
-            if st.button("📋 Copy Q", key="copy_last_q",
-                         use_container_width=True,
-                         disabled=not bool(_last_user_q)):
-                st.session_state["_show_copy_q"] = not st.session_state.get("_show_copy_q", False)
-        with _util_col2:
-            if st.button("🔄 Reload Q", key="reload_last_q",
-                         use_container_width=True,
-                         disabled=not bool(_last_user_q),
-                         help="Re-ask the last question"):
-                st.session_state["_pending_query"] = _last_user_q
-                st.rerun()
-        if st.session_state.get("_show_copy_q") and _last_user_q:
-            st.code(_last_user_q, language=None)
-
         # Step 1 — user hits Send: show message immediately, queue the query
         if submit and query.strip():
-            st.session_state["_show_copy_q"] = False   # close any open copy block
             st.session_state.messages.append({"role": "user", "content": query.strip()})
             st.session_state["_pending_query"] = query.strip()
             st.rerun()
