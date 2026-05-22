@@ -336,60 +336,14 @@ html, body { background-color: var(--bg) !important; }
     box-shadow: 0 8px 28px rgba(240,192,96,.45) !important;
 }
 
-/* ── Chat input bar (bottom of viewport) ── */
-/* Backdrop fade so the bar blends into the app background */
-[data-testid="stBottom"] {
-    background: linear-gradient(180deg, transparent 0%, var(--bg) 35%) !important;
-    padding: 6px 0 4px !important;
-}
-/* Outer container */
-[data-testid="stChatInput"] {
-    background: var(--surface2) !important;
-    border: 1.5px solid var(--border2) !important;
-    border-radius: var(--radius-lg) !important;
-    transition: border-color .25s, box-shadow .25s !important;
-}
-[data-testid="stChatInput"]:focus-within {
-    border-color: var(--violet) !important;
-    background: var(--surface3) !important;
-    box-shadow: 0 0 0 4px rgba(157,111,255,.15), 0 4px 20px rgba(157,111,255,.12) !important;
-}
-/* Text area inside — explicit color so typed text is visible on dark bg */
-[data-testid="stChatInputTextArea"],
-[data-testid="stChatInput"] textarea,
-[data-testid="stChatInput"] input {
-    background: transparent !important;
-    color: #f0eeff !important;
-    -webkit-text-fill-color: #f0eeff !important;
-    caret-color: #9d6fff !important;
-    font-family: 'Inter', sans-serif !important;
-    font-size: 0.95rem !important;
-}
-[data-testid="stChatInputTextArea"]::placeholder,
-[data-testid="stChatInput"] textarea::placeholder {
-    color: #6060a0 !important;
-    -webkit-text-fill-color: #6060a0 !important;
-    opacity: 1 !important;
-}
-/* Send button — gold gradient matching old Send ➤ button */
-[data-testid="stChatInputSubmitButton"] > button {
-    background: linear-gradient(135deg, var(--gold2) 0%, var(--gold) 100%) !important;
-    color: #0a0a0f !important;
-    border: none !important;
-    border-radius: var(--radius) !important;
-    font-weight: 700 !important;
-    box-shadow: 0 2px 10px rgba(240,192,96,.35) !important;
-    transition: all .2s !important;
-}
-[data-testid="stChatInputSubmitButton"] > button:hover {
-    box-shadow: 0 4px 18px rgba(240,192,96,.55) !important;
-    transform: scale(1.06) !important;
-}
-/* SVG arrow icon inside send button — keep it dark to stay readable on gold */
-[data-testid="stChatInputSubmitButton"] > button svg,
-[data-testid="stChatInputSubmitButton"] > button svg * {
-    fill: #0a0a0f !important;
-    stroke: #0a0a0f !important;
+/* ── Sticky query form — pinned to bottom of viewport ── */
+[data-testid="stForm"] {
+    position: sticky !important;
+    bottom: 0 !important;
+    z-index: 200 !important;
+    background: linear-gradient(180deg, transparent 0%, var(--bg) 28%) !important;
+    padding: 14px 0 10px !important;
+    margin-top: 1.2rem !important;
 }
 
 /* ── Tables ── */
@@ -609,7 +563,7 @@ header[data-testid="stHeader"] button:hover svg {
     fill: var(--gold) !important;
 }
 
-.block-container { padding-top: 1rem !important; padding-bottom: 1rem !important; }
+.block-container { padding-top: 1rem !important; padding-bottom: 5rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -2102,7 +2056,7 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
     </script>
     """, unsafe_allow_html=True)
 
-    # ── Stop button (shown while a query is processing) ──────────────────────
+    # ── Query form (sticky to bottom) OR stop button while processing ─────────
     if st.session_state.get("_pending_query"):
         _sc, _ = st.columns([2, 8])
         with _sc:
@@ -2116,17 +2070,23 @@ div[data-testid="stHorizontalBlock"] > div:nth-child(3) button[data-testid="base
                 st.session_state.pop("_processing", None)
                 st.toast("Query cancelled.", icon="🛑")
                 st.rerun()
+    else:
+        with st.form(key="query_form", clear_on_submit=True):
+            col_in, col_btn = st.columns([5, 1])
+            with col_in:
+                query = st.text_input(
+                    "Ask a question",
+                    placeholder="What does the document say about…?",
+                    label_visibility="collapsed",
+                )
+            with col_btn:
+                submit = st.form_submit_button("Send ➤", use_container_width=True)
 
-    # ── Chat input — always pinned to the bottom of the viewport ─────────────
-    _query_input = st.chat_input(
-        "Ask a question about your documents…",
-        disabled=bool(st.session_state.get("_pending_query")),
-    )
-    if _query_input and _query_input.strip():
-        st.session_state.messages.append({"role": "user", "content": _query_input.strip()})
-        st.session_state["_pending_query"] = _query_input.strip()
-        st.session_state.pop("_awaiting_feedback", None)
-        st.rerun()
+        if submit and query.strip():
+            st.session_state.messages.append({"role": "user", "content": query.strip()})
+            st.session_state["_pending_query"] = query.strip()
+            st.session_state.pop("_awaiting_feedback", None)
+            st.rerun()
 
     # Process pending query (only runs when _pending_query is still set after the
     # Stop button check above — i.e., user did not click Stop on this rerun)
