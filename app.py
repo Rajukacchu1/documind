@@ -1258,6 +1258,44 @@ def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
     return [header] + matched
 
 
+_FREQ_COL_RE = re.compile(r'^\s*frequency\s*$', re.IGNORECASE)
+
+# Maps query keywords → canonical Frequency column values
+_FREQ_KEYWORDS = {
+    "weekly":      "weekly",
+    "daily":       "daily",
+    "monthly":     "monthly",
+    "immediate":   "immediate",
+    "per visit":   "per visit",
+    "per subject": "per subject",
+}
+
+
+def _detect_frequency(query: str) -> str | None:
+    """Return the frequency value if the query mentions one (e.g. 'weekly')."""
+    q_lower = query.lower()
+    for kw, val in _FREQ_KEYWORDS.items():
+        if re.search(r'\b' + re.escape(kw) + r'\b', q_lower):
+            return val
+    return None
+
+
+def _filter_table_rows_by_freq(rows: list, freq: str) -> list:
+    """Keep only rows whose Frequency column matches freq. Returns original rows if no Frequency column found."""
+    if not rows or len(rows) < 2:
+        return rows
+    header = rows[0]
+    freq_col = next(
+        (i for i, cell in enumerate(header) if _FREQ_COL_RE.match(str(cell))),
+        None,
+    )
+    if freq_col is None:
+        return rows
+    freq_re = re.compile(r'\b' + re.escape(freq) + r'\b', re.IGNORECASE)
+    matched = [r for r in rows[1:] if freq_col < len(r) and freq_re.search(str(r[freq_col]))]
+    return [header] + matched if matched else rows
+
+
 def _domain_filter(query: str, chunks: list):
     """
     If the query names a CDISC domain, return only chunks containing that domain.
@@ -2290,6 +2328,17 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
         if _domain_result is not None:
             relevant = _domain_result or relevant
 
+        # ── Frequency filter (weekly, daily, monthly, etc.) ───────────────────
+        # When the query requests a frequency cross-section (e.g. "weekly checks"),
+        # expand to ALL chunks from the matched document so no rows are missed,
+        # then filter table rows by the Frequency column at render time.
+        _query_freq = _detect_frequency(pending)
+        if _query_freq and _matched_srcs and not _query_domain:
+            _all_matched_chunks = [c for c in st.session_state.doc_chunks
+                                   if c["source"] in _matched_srcs]
+            if _all_matched_chunks:
+                relevant = _all_matched_chunks
+
         context = build_context(relevant)
 
         # ── Image classification (table / relevant / irrelevant) ─────────────
@@ -2367,11 +2416,13 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                 for t in c.get("tables", []):
                     if not _is_quality_table(t):
                         continue
-                    # When a specific CDISC domain is requested, keep only rows
-                    # for that domain — prevents showing the full multi-domain table.
                     if _query_domain:
                         t = _filter_table_rows_by_domain(t, _query_domain)
-                        if len(t) < 2:   # header only → no matching rows, skip
+                        if len(t) < 2:
+                            continue
+                    if _query_freq:
+                        t = _filter_table_rows_by_freq(t, _query_freq)
+                        if len(t) < 2:
                             continue
                     if page_key not in seen_pages:
                         seen_pages.add(page_key)
@@ -2425,7 +2476,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
 
             # Merge multi-page tables into one — applies to both domain queries and
             # schedule/table queries where the same table spans multiple pages.
-            if (_query_domain or _is_table_q) and len(direct_tables) > 1:
+            if (_query_domain or _query_freq or _is_table_q) and len(direct_tables) > 1:
                 _merged_header = direct_tables[0][0][0]   # header row from first table
                 _merged_rows = []
                 _seen_row_keys: set = set()
@@ -2531,15 +2582,19 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
             thinking_slot.empty()
             answer_html, _, extra_tables = render_answer(raw_answer, relevant)
 
-            # Apply domain filter and dedup-merge for LLM-path tables
-            if _query_domain and extra_tables:
-                _dom_filtered = []
+            # Apply domain / frequency filter and dedup-merge for LLM-path tables
+            if (_query_domain or _query_freq) and extra_tables:
+                _filtered_et = []
                 for _et, _es, _ep in extra_tables:
-                    _tf = _filter_table_rows_by_domain(_et, _query_domain)
+                    _tf = _et
+                    if _query_domain:
+                        _tf = _filter_table_rows_by_domain(_tf, _query_domain)
+                    if _query_freq:
+                        _tf = _filter_table_rows_by_freq(_tf, _query_freq)
                     if len(_tf) >= 2:
-                        _dom_filtered.append((_tf, _es, _ep))
-                if _dom_filtered:
-                    extra_tables = _dom_filtered
+                        _filtered_et.append((_tf, _es, _ep))
+                if _filtered_et:
+                    extra_tables = _filtered_et
                     if len(extra_tables) > 1:
                         _mh = extra_tables[0][0][0]
                         _mr, _sk = [], set()
