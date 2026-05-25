@@ -2316,16 +2316,19 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                 if _la_domain != _pending_domain:
                     continue
 
-                # Guard 2: distinctive-word mismatch — if each query has words
-                # absent in the other, they're asking for different things
-                # (e.g. "weekly" vs "high criticality").
+                # Guard 2: distinctive-word mismatch — if either query has any
+                # words absent from the other, they're asking different things.
+                # E.g. "weekly checks" cached, pending "weekly checks data manager"
+                # → extra_p non-empty → bypass.  Also fires when cached had MORE
+                # filters (extra_l non-empty) so a broader pending query doesn't
+                # receive an over-filtered cached answer.
                 _la_words = {
                     w for w in re.findall(r'\b\w{3,}\b', la.get("query", "").lower())
                     if w not in _H_STOP
                 }
                 extra_p = _pending_words - _la_words
                 extra_l = _la_words - _pending_words
-                if len(extra_p) >= 2 or (extra_p and extra_l):
+                if extra_p or extra_l:
                     continue
 
                 msg = dict(la["message"])   # shallow copy so we don't mutate stored
