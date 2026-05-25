@@ -1258,42 +1258,60 @@ def _filter_table_rows_by_domain(rows: list, domain: str) -> list:
     return [header] + matched
 
 
-_FREQ_COL_RE = re.compile(r'^\s*frequency\s*$', re.IGNORECASE)
+def _detect_col_filters(query: str, rows: list) -> dict:
+    """
+    Given merged table rows (header + data rows from a document), return
+    {col_index: matched_value} for every column whose cell values appear in
+    the query as whole words.
 
-# Maps query keywords → canonical Frequency column values
-_FREQ_KEYWORDS = {
-    "weekly":      "weekly",
-    "daily":       "daily",
-    "monthly":     "monthly",
-    "immediate":   "immediate",
-    "per visit":   "per visit",
-    "per subject": "per subject",
-}
-
-
-def _detect_frequency(query: str) -> str | None:
-    """Return the frequency value if the query mentions one (e.g. 'weekly')."""
-    q_lower = query.lower()
-    for kw, val in _FREQ_KEYWORDS.items():
-        if re.search(r'\b' + re.escape(kw) + r'\b', q_lower):
-            return val
-    return None
-
-
-def _filter_table_rows_by_freq(rows: list, freq: str) -> list:
-    """Keep only rows whose Frequency column matches freq. Returns original rows if no Frequency column found."""
+    Domain / Dataset columns are skipped — those are handled by _domain_filter.
+    Values shorter than 3 characters are ignored to avoid noise.
+    """
     if not rows or len(rows) < 2:
-        return rows
+        return {}
     header = rows[0]
-    freq_col = next(
-        (i for i, cell in enumerate(header) if _FREQ_COL_RE.match(str(cell))),
-        None,
-    )
-    if freq_col is None:
+    q_lower = query.lower()
+    filters: dict = {}
+
+    for col_idx, col_header in enumerate(header):
+        h = str(col_header).strip()
+        # Skip domain / dataset columns (handled separately)
+        if (_DOMAIN_COL_RE.match(h) or
+                re.match(r'^\s*dataset\b', h, re.IGNORECASE)):
+            continue
+
+        # Collect unique non-empty values for this column
+        seen: dict = {}
+        for row in rows[1:]:
+            if col_idx < len(row):
+                v = str(row[col_idx]).strip()
+                if v and v.lower() not in ('nan', 'none', ''):
+                    seen[v.lower()] = v   # lowercase key → original value
+
+        # Check if any value appears verbatim (whole word) in the query
+        for v_lower, v_orig in seen.items():
+            if len(v_lower) >= 3 and re.search(
+                    r'\b' + re.escape(v_lower) + r'\b', q_lower):
+                filters[col_idx] = v_orig
+                break   # one match per column is enough
+
+    return filters
+
+
+def _apply_col_filters(rows: list, filters: dict) -> list:
+    """Keep only rows where every column in *filters* matches its value."""
+    if not rows or len(rows) < 2 or not filters:
         return rows
-    freq_re = re.compile(r'\b' + re.escape(freq) + r'\b', re.IGNORECASE)
-    matched = [r for r in rows[1:] if freq_col < len(r) and freq_re.search(str(r[freq_col]))]
-    return [header] + matched if matched else rows
+    matched = [
+        r for r in rows[1:]
+        if all(
+            col_idx < len(r) and re.search(
+                r'\b' + re.escape(str(val)) + r'\b', str(r[col_idx]), re.IGNORECASE
+            )
+            for col_idx, val in filters.items()
+        )
+    ]
+    return [rows[0]] + matched if matched else rows
 
 
 def _domain_filter(query: str, chunks: list):
@@ -2328,16 +2346,28 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
         if _domain_result is not None:
             relevant = _domain_result or relevant
 
-        # ── Frequency filter (weekly, daily, monthly, etc.) ───────────────────
-        # When the query requests a frequency cross-section (e.g. "weekly checks"),
-        # expand to ALL chunks from the matched document so no rows are missed,
-        # then filter table rows by the Frequency column at render time.
-        _query_freq = _detect_frequency(pending)
-        if _query_freq and _matched_srcs and not _query_domain:
-            _all_matched_chunks = [c for c in st.session_state.doc_chunks
-                                   if c["source"] in _matched_srcs]
-            if _all_matched_chunks:
-                relevant = _all_matched_chunks
+        # ── General column-value filter for tabular documents ────────────────
+        # When a specific document is named and no CDISC domain filter applies,
+        # expand relevant to ALL chunks from that document (so no rows are missed
+        # due to top-K retrieval), then auto-detect which column values from the
+        # table appear in the query and filter rows accordingly.
+        # Works for any column: Frequency, Criticality, Status, Responsible Role…
+        _query_col_filters: dict = {}
+        if _matched_srcs and not _query_domain:
+            _all_matched = [c for c in st.session_state.doc_chunks
+                            if c["source"] in _matched_srcs]
+            if _all_matched:
+                relevant = _all_matched
+                # Collect merged rows to detect column filters
+                _merged_for_detect: list = []
+                for _c in _all_matched:
+                    for _t in _c.get("tables", []):
+                        if _is_quality_table(_t):
+                            if not _merged_for_detect:
+                                _merged_for_detect = [_t[0]]   # header from first table
+                            _merged_for_detect.extend(_t[1:])
+                if _merged_for_detect:
+                    _query_col_filters = _detect_col_filters(pending, _merged_for_detect)
 
         context = build_context(relevant)
 
@@ -2420,8 +2450,8 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                         t = _filter_table_rows_by_domain(t, _query_domain)
                         if len(t) < 2:
                             continue
-                    if _query_freq:
-                        t = _filter_table_rows_by_freq(t, _query_freq)
+                    if _query_col_filters:
+                        t = _apply_col_filters(t, _query_col_filters)
                         if len(t) < 2:
                             continue
                     if page_key not in seen_pages:
@@ -2476,7 +2506,7 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
 
             # Merge multi-page tables into one — applies to both domain queries and
             # schedule/table queries where the same table spans multiple pages.
-            if (_query_domain or _query_freq or _is_table_q) and len(direct_tables) > 1:
+            if (_query_domain or _query_col_filters or _is_table_q) and len(direct_tables) > 1:
                 _merged_header = direct_tables[0][0][0]   # header row from first table
                 _merged_rows = []
                 _seen_row_keys: set = set()
@@ -2582,15 +2612,15 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
             thinking_slot.empty()
             answer_html, _, extra_tables = render_answer(raw_answer, relevant)
 
-            # Apply domain / frequency filter and dedup-merge for LLM-path tables
-            if (_query_domain or _query_freq) and extra_tables:
+            # Apply domain / column-value filter and dedup-merge for LLM-path tables
+            if (_query_domain or _query_col_filters) and extra_tables:
                 _filtered_et = []
                 for _et, _es, _ep in extra_tables:
                     _tf = _et
                     if _query_domain:
                         _tf = _filter_table_rows_by_domain(_tf, _query_domain)
-                    if _query_freq:
-                        _tf = _filter_table_rows_by_freq(_tf, _query_freq)
+                    if _query_col_filters:
+                        _tf = _apply_col_filters(_tf, _query_col_filters)
                     if len(_tf) >= 2:
                         _filtered_et.append((_tf, _es, _ep))
                 if _filtered_et:
