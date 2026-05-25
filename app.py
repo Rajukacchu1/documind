@@ -2404,17 +2404,24 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
         # In retry mode (user said "No"), force the LLM path regardless of heading match
         # "partial" retry keeps direct render (heading match still valid)
         # boolean True retry (full No) forces LLM for a fresh interpretation
-        use_direct = (_retry_mode is not True) and (_is_table_q or best_hscore >= 2)
+        # Column-filter queries (weekly, high criticality, etc.) always use direct
+        # render — the rows are already filtered, Claude is not needed and would
+        # produce a wrong heading by echoing whatever section it sees first.
+        use_direct = (_retry_mode is not True) and (
+            bool(_query_col_filters) or _is_table_q or best_hscore >= 2
+        )
 
         if use_direct:
             # ── DIRECT RENDER — preserve document structure exactly ───────────
             # Select chunks: table queries use all relevant; heading queries use
             # only well-matched chunks, sorted best-match first.
             if _is_table_q:
-                # For table queries: prefer chunks whose heading scores > 0
-                # (near the schedule heading), fall back to all relevant only if needed.
                 sched_chunks = [c for c in relevant if c["_hscore"] > 0]
                 render_chunks = sched_chunks if sched_chunks else relevant
+            elif _query_col_filters:
+                # Column-filter query: use ALL relevant chunks — every chunk may
+                # contain rows that match the filter (e.g. weekly rows span all domains).
+                render_chunks = relevant
             else:
                 render_chunks = sorted(
                     [c for c in relevant if c["_hscore"] >= 2],
@@ -2531,6 +2538,10 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                     r'\b' + re.escape(_q_domain_for_hdr.title()) + r'\b',
                     _q_domain_for_hdr.upper(), _th
                 )
+            elif _query_col_filters:
+                # Column-filter query: heading must reflect what the user asked for,
+                # not a chunk heading that may name a completely different domain.
+                top_heading = pending.strip().title()
             elif render_chunks:
                 best = max(render_chunks, key=lambda c: c["_hscore"])
                 top_heading = best.get("heading") or pending.strip().title()
