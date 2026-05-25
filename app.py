@@ -2323,7 +2323,9 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                     w for w in re.findall(r'\b\w{3,}\b', la.get("query", "").lower())
                     if w not in _H_STOP
                 }
-                if (_pending_words - _la_words) and (_la_words - _pending_words):
+                extra_p = _pending_words - _la_words
+                extra_l = _la_words - _pending_words
+                if len(extra_p) >= 2 or (extra_p and extra_l):
                     continue
 
                 msg = dict(la["message"])   # shallow copy so we don't mutate stored
