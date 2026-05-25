@@ -380,8 +380,17 @@ hr { border-color: var(--border2) !important; }
 ::-webkit-scrollbar-thumb:hover { background: #6d28d9; }
 
 /* ── Dataframe toolbar ── */
-/* wrapper — no overflow:hidden so toolbar overlay is never clipped */
-[data-testid="stDataFrame"] { border-radius: var(--radius) !important; }
+/* outer wrapper: relative positioning context + visible overflow so the
+   absolutely-positioned toolbar is never clipped */
+[data-testid="stDataFrame"] {
+    border-radius: var(--radius) !important;
+    position: relative !important;
+    overflow: visible !important;
+}
+/* inner scrollable area — keep horizontal scroll but don't clip the toolbar */
+[data-testid="stDataFrameResizable"] {
+    overflow: auto !important;
+}
 
 /* toolbar container */
 [data-testid="stElementToolbar"] {
@@ -394,6 +403,8 @@ hr { border-color: var(--border2) !important; }
     visibility: visible !important;
     display: flex !important;
     align-items: center !important;
+    z-index: 9999 !important;
+    position: absolute !important;
 }
 
 /* every button in the toolbar */
@@ -2115,8 +2126,19 @@ else:
                 if t and len(t) > 1:
                     try:
                         import pandas as pd
-                        df = pd.DataFrame(t[1:], columns=[str(c) for c in t[0]])
-                        st.dataframe(df, use_container_width=True)
+                        header = [str(c) if c is not None else f"Col{i}"
+                                  for i, c in enumerate(t[0])]
+                        ncols = len(header)
+                        padded = []
+                        for row in t[1:]:
+                            r = list(row)
+                            if len(r) < ncols:
+                                r += [""] * (ncols - len(r))
+                            else:
+                                r = r[:ncols]
+                            padded.append(r)
+                        df = pd.DataFrame(padded, columns=header)
+                        st.dataframe(df, use_container_width=True, hide_index=True)
                     except Exception:
                         st.markdown(table_to_html(t), unsafe_allow_html=True)
 
