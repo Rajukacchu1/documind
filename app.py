@@ -2299,11 +2299,33 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
         # 2-char codes are invisible to _heading_match).
         _served_from_learned = False
         _pending_domain = _detect_domain(pending)
+        _pending_words = {
+            w for w in re.findall(r'\b\w{3,}\b', pending.lower())
+            if w not in _H_STOP
+        }
         for la in st.session_state.learned_answers:
             if _heading_match(pending, la["query"]) >= 2:
                 _la_domain = _detect_domain(la.get("query", ""))
-                if _pending_domain and _la_domain and _pending_domain != _la_domain:
-                    continue   # different domain — do not serve this cached answer
+
+                # Guard 1: domain mismatch — one query has a domain, the other
+                # doesn't, or they name different domains.  Previously this only
+                # fired when BOTH had a domain, so a domain-specific cached answer
+                # (e.g. "AE …") was wrongly served for a non-domain query
+                # (e.g. "weekly checks") that shared stop-list words like
+                # "checks / detailed / drp".
+                if _la_domain != _pending_domain:
+                    continue
+
+                # Guard 2: distinctive-word mismatch — if each query has words
+                # absent in the other, they're asking for different things
+                # (e.g. "weekly" vs "high criticality").
+                _la_words = {
+                    w for w in re.findall(r'\b\w{3,}\b', la.get("query", "").lower())
+                    if w not in _H_STOP
+                }
+                if (_pending_words - _la_words) and (_la_words - _pending_words):
+                    continue
+
                 msg = dict(la["message"])   # shallow copy so we don't mutate stored
                 st.session_state.messages.append(msg)
                 st.session_state["_awaiting_feedback"] = True
