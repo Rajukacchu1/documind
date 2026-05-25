@@ -2132,16 +2132,38 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
     if st.session_state.get("_pending_query"):
         _cc, _ = st.columns([2, 8])
         with _cc:
-            st.markdown(
-                '<div style="font-size:.8rem;color:#c8c5ff;padding:2px 0 4px;">⏳ Searching documents…</div>',
-                unsafe_allow_html=True,
-            )
-            if st.button("⏹ Cancel Query", key="stop_btn", use_container_width=True,
-                         help="Cancel this query"):
+            if st.button("Cancel Query", key="stop_btn", use_container_width=False):
                 st.session_state.pop("_pending_query", None)
                 st.session_state.pop("_processing", None)
                 st.toast("Query cancelled.", icon="🛑")
                 st.rerun()
+        # Style the cancel button as plain text via JS (CSS can't target by key in Streamlit)
+        st.markdown("""
+        <script>
+        (function() {
+            function styleCancel() {
+                document.querySelectorAll('button').forEach(function(b) {
+                    if (b.innerText.trim() === 'Cancel Query') {
+                        b.style.cssText = [
+                            'background:transparent!important',
+                            'border:none!important',
+                            'box-shadow:none!important',
+                            'color:#f0eeff!important',
+                            'font-size:1rem!important',
+                            'font-weight:600!important',
+                            'padding:4px 0!important',
+                            'text-decoration:none!important',
+                            'outline:none!important',
+                            'width:auto!important',
+                        ].join(';');
+                    }
+                });
+            }
+            styleCancel();
+            setTimeout(styleCancel, 100);
+            setTimeout(styleCancel, 400);
+        })();
+        </script>""", unsafe_allow_html=True)
 
     # Thinking indicator — shown while query is pending
     thinking_slot = st.empty()
