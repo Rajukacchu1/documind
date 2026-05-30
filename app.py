@@ -1914,8 +1914,6 @@ with st.sidebar:
         st.rerun()
 
     if load_btn:
-        import concurrent.futures
-
         EXTS = {".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".xls"}
 
         # Collect files to process:
@@ -1958,11 +1956,9 @@ with st.sidebar:
 
             new_chunks = []
             with st.spinner(f"Reading {len(tasks)} file(s)…"):
-                # Parallel parse — I/O already done above, this parallelises CPU parsing
-                with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(tasks))) as ex:
-                    for name, chunks in ex.map(_parse, tasks):
-                        new_chunks.extend(chunks)
-                        st.session_state.loaded_files.append(name)
+                for name, chunks in map(_parse, tasks):
+                    new_chunks.extend(chunks)
+                    st.session_state.loaded_files.append(name)
 
             if new_chunks:
                 st.session_state.doc_chunks.extend(new_chunks)
