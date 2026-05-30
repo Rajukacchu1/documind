@@ -1910,7 +1910,7 @@ with st.sidebar:
         st.session_state.doc_pdf_bytes = {}
         st.session_state.page_img_cache = {}
         st.session_state.learned_answers = []
-        st.session_state.folder_path_input = ""
+        st.session_state["_folder_reset"] = True
         st.session_state.pop("_awaiting_feedback", None)
         st.session_state.pop("_feedback_query", None)
         st.session_state.pop("_retry_mode", None)
