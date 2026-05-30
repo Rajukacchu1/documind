@@ -1884,12 +1884,9 @@ with st.sidebar:
             unsafe_allow_html=True,
         )
     else:
-        _default_folder = st.secrets.get("DOCS_FOLDER", r"C:\Users\User\OneDrive\Desktop\Study Guide\docs")
         # Reset flag set by Clear button — must happen BEFORE widget is instantiated
         if st.session_state.pop("_folder_reset", False):
             st.session_state.folder_path_input = ""
-        elif not st.session_state.folder_path_input:
-            st.session_state.folder_path_input = _default_folder
         folder_path = st.text_input(
             "Or enter a folder path",
             placeholder="C:/path/to/your/documents",
