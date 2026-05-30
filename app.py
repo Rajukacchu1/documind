@@ -1885,7 +1885,10 @@ with st.sidebar:
         )
     else:
         _default_folder = st.secrets.get("DOCS_FOLDER", r"C:\Users\User\OneDrive\Desktop\Study Guide\docs")
-        if not st.session_state.folder_path_input:
+        # Reset flag set by Clear button — must happen BEFORE widget is instantiated
+        if st.session_state.pop("_folder_reset", False):
+            st.session_state.folder_path_input = ""
+        elif not st.session_state.folder_path_input:
             st.session_state.folder_path_input = _default_folder
         folder_path = st.text_input(
             "Or enter a folder path",
@@ -1907,7 +1910,7 @@ with st.sidebar:
         st.session_state.doc_pdf_bytes = {}
         st.session_state.page_img_cache = {}
         st.session_state.learned_answers = []
-        st.session_state.folder_path_input = ""
+        st.session_state["_folder_reset"] = True
         st.session_state.pop("_awaiting_feedback", None)
         st.session_state.pop("_feedback_query", None)
         st.session_state.pop("_retry_mode", None)
