@@ -2437,6 +2437,32 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                 if _query_col_filters or _src_is_tabular:
                     relevant = _all_matched
 
+        # ── Score each chunk by heading match ────────────────────────────────
+        # Done BEFORE building context so we can trim relevant to the best-
+        # matching section(s) before the LLM sees it.
+        for c in relevant:
+            c["_hscore"] = max(
+                _heading_match(pending, c.get("heading", "")),
+                _text_heading_match(pending, c.get("text", "")),
+            )
+        best_hscore = max((c["_hscore"] for c in relevant), default=0)
+
+        # ── Narrow relevant to the best-matching section for text queries ─────
+        # When querying a named text document (no col-filter, no table query),
+        # only keep chunks whose heading score equals the best score if that
+        # score is specific (≥3).  This prevents "Data Entry Format for Date"
+        # sections from polluting an answer about "Data Entry Format for Time".
+        # For low/ambiguous scores (≤2) keep all relevant chunks unchanged.
+        if (
+            not _query_col_filters
+            and not _is_table_q
+            and not _query_domain
+            and best_hscore >= 3
+        ):
+            _best_chunks = [c for c in relevant if c["_hscore"] == best_hscore]
+            if _best_chunks:
+                relevant = _best_chunks
+
         context = build_context(relevant)
 
         # ── Image classification (table / relevant / irrelevant) ─────────────
@@ -2454,16 +2480,6 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                 if _img_cnt[b64] == 1 and b64 not in _seen_b64:
                     _uniq_imgs.append((b64, c["source"], c["page"]))
                     _seen_b64.add(b64)
-
-        # ── Score each chunk by heading match ────────────────────────────────
-        # Use max of extracted-heading score and text-scan score so eCRF-style
-        # pages with repeated document headers are still found correctly.
-        for c in relevant:
-            c["_hscore"] = max(
-                _heading_match(pending, c.get("heading", "")),
-                _text_heading_match(pending, c.get("text", "")),
-            )
-        best_hscore = max((c["_hscore"] for c in relevant), default=0)
 
         # ── Route: direct render (structure-preserving) vs LLM ───────────────
         # Direct render when:
@@ -2491,8 +2507,12 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                 # contain rows that match the filter (e.g. weekly rows span all domains).
                 render_chunks = relevant
             else:
+                # Specific section query (best ≥ 3): only show the best-scoring
+                # chunks so unrelated sections (same score −1) are excluded.
+                # Broad query (best ≤ 2): include everything scoring ≥ 2.
+                _min_rc = best_hscore if best_hscore >= 3 else 2
                 render_chunks = sorted(
-                    [c for c in relevant if c["_hscore"] >= 2],
+                    [c for c in relevant if c["_hscore"] >= _min_rc],
                     key=lambda c: (-c["_hscore"], c["page"]),
                 )
                 # Include the page immediately after each matched heading so figures
