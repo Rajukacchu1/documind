@@ -2119,13 +2119,16 @@ else:
                 st.caption("Answer text — click the copy icon to copy:")
                 st.code(msg.get("content", ""), language=None)
 
-            # Inline images (page renders + classified doc images)
+            # Inline images — rendered as data URIs to avoid Streamlit's media
+            # file registry (which causes "Missing file" errors on reconnect).
             if images:
                 for b64, src, page in images:
-                    st.image(
-                        base64.b64decode(b64),
-                        caption=f"{src} – p.{page}",
-                        use_container_width=True,
+                    st.markdown(
+                        f'<img src="data:image/png;base64,{b64}" '
+                        f'style="max-width:100%;border-radius:8px;margin:6px 0;display:block;" />'
+                        f'<div style="font-size:.75rem;color:var(--text-muted);margin-bottom:8px;">'
+                        f'{src} – p.{page}</div>',
+                        unsafe_allow_html=True,
                     )
 
             # Structured tables — plain Streamlit dataframe
