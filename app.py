@@ -1921,9 +1921,10 @@ with st.sidebar:
 
         EXTS = {".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".xls"}
 
-        # Collect files to process — uploaded files take priority over folder path.
-        # If the user uploaded files, load those only.
-        # If no uploads but a folder path is set, load from the folder only.
+        # Collect files to process:
+        # - Uploaded files are always loaded when present.
+        # - Folder path is loaded when the field is non-empty (independent of uploads).
+        # So: uploads only → loads uploads; path only → loads path; both → loads both.
         tasks = []  # list of (name, bytes)
 
         if uploaded_files:
@@ -1933,7 +1934,8 @@ with st.sidebar:
                     tasks.append((f.name, data))
                     if f.name.lower().endswith(".pdf"):
                         st.session_state.doc_pdf_bytes[f.name] = data
-        elif folder_path and Path(folder_path).is_dir():
+
+        if folder_path and Path(folder_path).is_dir():
             for fp in Path(folder_path).rglob("*"):
                 if fp.suffix.lower() in EXTS and fp.name not in st.session_state.loaded_files:
                     try:
