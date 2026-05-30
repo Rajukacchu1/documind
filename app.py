@@ -624,6 +624,8 @@ if "doc_pdf_bytes" not in st.session_state:
     st.session_state.doc_pdf_bytes = {}   # filename → raw PDF bytes for page rendering
 if "page_img_cache" not in st.session_state:
     st.session_state.page_img_cache = {}  # (filename, page_num, mode) → base64 PNG
+if "folder_path_input" not in st.session_state:
+    st.session_state.folder_path_input = ""
 _LEARNED_FILE = Path(__file__).parent / "learned_answers.json"
 
 
@@ -1883,10 +1885,12 @@ with st.sidebar:
         )
     else:
         _default_folder = st.secrets.get("DOCS_FOLDER", r"C:\Users\User\OneDrive\Desktop\Study Guide\docs")
+        if not st.session_state.folder_path_input:
+            st.session_state.folder_path_input = _default_folder
         folder_path = st.text_input(
             "Or enter a folder path",
             placeholder="C:/path/to/your/documents",
-            value=_default_folder,
+            key="folder_path_input",
         )
 
     col1, col2 = st.columns(2)
@@ -1903,6 +1907,7 @@ with st.sidebar:
         st.session_state.doc_pdf_bytes = {}
         st.session_state.page_img_cache = {}
         st.session_state.learned_answers = []
+        st.session_state.folder_path_input = ""
         st.session_state.pop("_awaiting_feedback", None)
         st.session_state.pop("_feedback_query", None)
         st.session_state.pop("_retry_mode", None)
