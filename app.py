@@ -2413,7 +2413,6 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
             _all_matched = [c for c in st.session_state.doc_chunks
                             if c["source"] in _matched_srcs]
             if _all_matched:
-                relevant = _all_matched
                 # Collect merged rows to detect column filters
                 _merged_for_detect: list = []
                 for _c in _all_matched:
@@ -2424,6 +2423,16 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                             _merged_for_detect.extend(_t[1:])
                 if _merged_for_detect:
                     _query_col_filters = _detect_col_filters(pending, _merged_for_detect)
+                # Expand to ALL document chunks only for tabular sources (Excel/CSV)
+                # or when column-value filters are detected (row-level table query).
+                # Text documents (eCRF guidelines, protocols) stay with the
+                # semantic top-K results so only the relevant section is returned.
+                _src_is_tabular = any(
+                    s.lower().endswith((".xlsx", ".xls", ".csv"))
+                    for s in _matched_srcs
+                )
+                if _query_col_filters or _src_is_tabular:
+                    relevant = _all_matched
 
         context = build_context(relevant)
 
@@ -2544,20 +2553,19 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                             direct_images.append((_nxt_img, src, pg + 1))
 
                 # ── Embedded images in the document ──
-                # Only shown for table/figure queries; for text-guideline queries
-                # the embedded form screenshots are supplementary noise.
-                if _is_table_q:
-                    for b64 in c.get("images", []):
-                        if b64 not in seen_img:
-                            seen_img.add(b64)
-                            if api_key and ANTHROPIC_OK:
-                                kind, rows = analyze_image(b64, pending, api_key)
-                                if kind == "table" and rows and _is_quality_table(rows):
-                                    direct_tables.append((rows, src, pg))
-                                elif kind == "relevant":
-                                    direct_images.append((b64, src, pg))
-                            else:
+                # Show unique (non-logo) images from any relevant chunk.
+                # Logos repeat across pages so _img_cnt > 1 filters them out.
+                for b64 in c.get("images", []):
+                    if b64 not in seen_img and _img_cnt.get(b64, 0) == 1:
+                        seen_img.add(b64)
+                        if api_key and ANTHROPIC_OK and _is_table_q:
+                            kind, rows = analyze_image(b64, pending, api_key)
+                            if kind == "table" and rows and _is_quality_table(rows):
+                                direct_tables.append((rows, src, pg))
+                            elif kind == "relevant":
                                 direct_images.append((b64, src, pg))
+                        else:
+                            direct_images.append((b64, src, pg))
 
                 # ── Text sections (PDF and non-PDF) ──
                 # Show text when no quality table has claimed this page.
