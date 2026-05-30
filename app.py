@@ -1910,7 +1910,7 @@ with st.sidebar:
         st.session_state.doc_pdf_bytes = {}
         st.session_state.page_img_cache = {}
         st.session_state.learned_answers = []
-        st.session_state["_folder_reset"] = True
+        st.session_state.folder_path_input = ""
         st.session_state.pop("_awaiting_feedback", None)
         st.session_state.pop("_feedback_query", None)
         st.session_state.pop("_retry_mode", None)
@@ -1921,7 +1921,9 @@ with st.sidebar:
 
         EXTS = {".pdf", ".docx", ".txt", ".md", ".csv", ".xlsx", ".xls"}
 
-        # Collect all files to process (uploaded + folder), skip already-loaded
+        # Collect files to process — uploaded files take priority over folder path.
+        # If the user uploaded files, load those only.
+        # If no uploads but a folder path is set, load from the folder only.
         tasks = []  # list of (name, bytes)
 
         if uploaded_files:
@@ -1929,11 +1931,9 @@ with st.sidebar:
                 if f.name not in st.session_state.loaded_files:
                     data = f.read()
                     tasks.append((f.name, data))
-                    # Store raw PDF bytes so pages can be rendered as images later
                     if f.name.lower().endswith(".pdf"):
                         st.session_state.doc_pdf_bytes[f.name] = data
-
-        if folder_path and Path(folder_path).is_dir():
+        elif folder_path and Path(folder_path).is_dir():
             for fp in Path(folder_path).rglob("*"):
                 if fp.suffix.lower() in EXTS and fp.name not in st.session_state.loaded_files:
                     try:
