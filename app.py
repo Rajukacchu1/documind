@@ -635,6 +635,36 @@ header[data-testid="stHeader"] button:hover svg {
 
 .block-container { padding-top: 1rem !important; padding-bottom: 2rem !important; }
 </style>
+<script>
+/* Global clipboard helper — called by onclick on pure HTML buttons so the
+   user-gesture context is preserved (no Streamlit rerun in between). */
+window.docuCopy = function(btn, enc) {
+    /* enc = base64(JSON.stringify(text, ensure_ascii=True)) */
+    var text;
+    try { text = JSON.parse(atob(enc)); } catch(e) { text = atob(enc); }
+    var origHtml = btn.innerHTML;
+    function done() {
+        btn.innerHTML = '✓';
+        btn.style.color = '#4ade80';
+        setTimeout(function() {
+            btn.innerHTML = origHtml;
+            btn.style.color = '';
+        }, 1600);
+    }
+    function fallback() {
+        var el = document.createElement('textarea');
+        el.value = text;
+        el.style.cssText = 'position:fixed;top:-9999px;opacity:0';
+        document.body.appendChild(el);
+        el.focus(); el.select();
+        try { document.execCommand('copy'); done(); } catch(ex) {}
+        document.body.removeChild(el);
+    }
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(done, fallback);
+    } else { fallback(); }
+};
+</script>
 """, unsafe_allow_html=True)
 
 # ── Imports (after page config) ───────────────────────────────────────────────
@@ -2157,25 +2187,19 @@ else:
                     unsafe_allow_html=True,
                 )
             with _qcopy_col:
+                _enc_q = base64.b64encode(
+                    json.dumps(_q_text, ensure_ascii=True).encode("ascii")
+                ).decode("ascii")
                 st.markdown(
-                    '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding-top:6px;">',
+                    f'<div style="display:flex;align-items:center;justify-content:'
+                    f'center;height:100%;padding-top:6px;">'
+                    f'<button onclick="window.docuCopy(this,\'{_enc_q}\')" '
+                    f'title="Copy question" '
+                    f'style="background:transparent;border:none;cursor:pointer;'
+                    f'font-size:1.1rem;color:var(--text,#f0eeff);padding:4px 6px;'
+                    f'border-radius:4px;line-height:1;">📋</button></div>',
                     unsafe_allow_html=True,
                 )
-                if st.button("📋", key=f"copy_q_{_msg_idx}",
-                             use_container_width=True, help="Copy question"):
-                    _js_q = json.dumps(_q_text)
-                    st.markdown(
-                        f"<script>(function(){{var t={_js_q};"
-                        "navigator.clipboard&&navigator.clipboard.writeText(t)"
-                        ".catch(function(){var e=document.createElement('textarea');"
-                        "e.value=t;e.style.cssText='position:fixed;opacity:0';"
-                        "document.body.appendChild(e);e.select();"
-                        "document.execCommand('copy');document.body.removeChild(e);});"
-                        "})();</script>",
-                        unsafe_allow_html=True,
-                    )
-                    st.toast("Copied to clipboard!", icon="📋")
-                st.markdown('</div>', unsafe_allow_html=True)
             with _qreload_col:
                 st.markdown(
                     '<div style="display:flex;align-items:center;justify-content:center;height:100%;padding-top:6px;">',
@@ -2200,20 +2224,18 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            # Copy answer — direct JS clipboard copy, no code block shown
-            if st.button("📋 Copy Answer", key=f"copy_a_{_msg_idx}", help="Copy answer text"):
-                _js_a = json.dumps(msg.get("content", ""))
-                st.markdown(
-                    f"<script>(function(){{var t={_js_a};"
-                    "navigator.clipboard&&navigator.clipboard.writeText(t)"
-                    ".catch(function(){var e=document.createElement('textarea');"
-                    "e.value=t;e.style.cssText='position:fixed;opacity:0';"
-                    "document.body.appendChild(e);e.select();"
-                    "document.execCommand('copy');document.body.removeChild(e);});"
-                    "})();</script>",
-                    unsafe_allow_html=True,
-                )
-                st.toast("Copied to clipboard!", icon="📋")
+            # Copy answer — pure HTML button so user-gesture context is preserved
+            _enc_a = base64.b64encode(
+                json.dumps(msg.get("content", ""), ensure_ascii=True).encode("ascii")
+            ).decode("ascii")
+            st.markdown(
+                f'<button onclick="window.docuCopy(this,\'{_enc_a}\')" '
+                f'style="background:#1a1a2e;color:#f0eeff;'
+                f'border:1px solid rgba(157,111,255,.45);border-radius:8px;'
+                f'padding:6px 16px;cursor:pointer;font-size:0.83rem;font-weight:600;'
+                f'margin:4px 0;letter-spacing:.03em;">📋 Copy Answer</button>',
+                unsafe_allow_html=True,
+            )
 
             # Inline images — rendered as data URIs to avoid Streamlit's media
             # file registry (which causes "Missing file" errors on reconnect).
