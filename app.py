@@ -970,6 +970,65 @@ def _text_heading_match(query: str, text: str) -> int:
     return best
 
 
+def _looks_like_heading(line: str) -> bool:
+    """Heuristic: short structural line, not a sentence or list item."""
+    s = line.strip()
+    if not (3 <= len(s) <= 70):
+        return False
+    if s.endswith(('.', ',', ':', ';')):
+        return False
+    if re.match(r'^\d+[.)]\s', s):          # numbered list: "1. ..."
+        return False
+    if re.match(r'^[-•*]\s', s):             # bullet
+        return False
+    # At least one meaningful word (rules out page numbers, "---" etc.)
+    return bool(re.search(r'\b[A-Za-z]{3,}\b', s))
+
+
+def _extract_section_text(text: str, section_query: str) -> tuple:
+    """
+    Extract [best-matching heading → next heading] from page text.
+
+    Returns (extracted_text, reached_end_of_chunk).
+    reached_end_of_chunk=True  → section likely continues on the next page.
+    reached_end_of_chunk=False → a new heading was found; section ends here.
+    Falls back to full text when no heading match found.
+    """
+    if not text or not section_query:
+        return text, False
+
+    lines = text.splitlines()
+
+    # Find the line that best matches the section query
+    best_score, best_idx = 0, -1
+    for i, line in enumerate(lines):
+        s = line.strip()
+        if not s:
+            continue
+        score = _heading_match(section_query, s)
+        if score > best_score:
+            best_score, best_idx = score, i
+
+    if best_idx == -1 or best_score < 1:
+        return text, False      # no match — leave chunk unchanged
+
+    # Scan forward for the next heading (a structural line that scores lower)
+    end_idx, found_next = len(lines), False
+    for i in range(best_idx + 2, len(lines)):
+        s = lines[i].strip()
+        if not s:
+            continue
+        if (_looks_like_heading(s)
+                and _heading_match(section_query, s) < best_score
+                and not _HEADING_SKIP.search(s)):
+            end_idx, found_next = i, True
+            break
+
+    extracted = '\n'.join(lines[best_idx:end_idx]).strip()
+    reached_end = not found_next
+    return extracted, reached_end
+
+
 def get_table_image(filename: str, page_num: int, heading_hint: str = "") -> str | None:
     """
     Render ONLY the relevant table/section from a PDF page, not the whole page.
@@ -2633,6 +2692,55 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
             )
             relevant = [c for _, c in _ranked[:3]]
             best_hscore = max((c["_hscore"] for c in relevant), default=0)
+
+        # ── Section extraction for named text-document queries ───────────────
+        # Trim each chunk's text to [matching heading → next heading] so the
+        # LLM never sees text from a prior section (e.g. "Review Investigator
+        # Comments") that happens to share the same PDF page.
+        # If the section runs to the end of the chunk (reached_end=True), also
+        # pull the following page chunk so continuation content isn't missed
+        # (e.g. "If the e-CRF status is Entry Complete... Change Reason...").
+        if _is_named_text_doc and _section_query != pending:
+            _sec_relevant: list = []
+            _sec_seen: set = set()
+            for _sc in relevant:
+                _sp = (_sc["source"], _sc["page"])
+                if _sp in _sec_seen:
+                    continue
+                _sec_seen.add(_sp)
+                _sec_text, _reaches_end = _extract_section_text(
+                    _sc.get("text", ""), _section_query
+                )
+                _sc_copy = dict(_sc)
+                _sc_copy["text"] = _sec_text
+                _sec_relevant.append(_sc_copy)
+
+                # Include next-page chunk when section continues past page boundary
+                if _reaches_end:
+                    _nsp = (_sc["source"], _sc["page"] + 1)
+                    if _nsp not in _sec_seen:
+                        _nxt = next(
+                            (ch for ch in st.session_state.doc_chunks
+                             if ch["source"] == _sc["source"]
+                             and ch["page"] == _sc["page"] + 1),
+                            None,
+                        )
+                        if _nxt:
+                            _sec_seen.add(_nsp)
+                            # Take continuation up to the first new heading
+                            _nxt_lines = _nxt.get("text", "").splitlines()
+                            _nxt_end = len(_nxt_lines)
+                            for _li, _ll in enumerate(_nxt_lines):
+                                if _li > 1 and _looks_like_heading(_ll.strip()):
+                                    _nxt_end = _li
+                                    break
+                            _nxt_copy = dict(_nxt)
+                            _nxt_copy["text"] = '\n'.join(
+                                _nxt_lines[:_nxt_end]
+                            ).strip()
+                            _sec_relevant.append(_nxt_copy)
+            if _sec_relevant:
+                relevant = _sec_relevant
 
         context = build_context(relevant)
 
