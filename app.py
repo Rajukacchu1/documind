@@ -987,12 +987,16 @@ def _looks_like_heading(line: str) -> bool:
 
 def _extract_section_text(text: str, section_query: str) -> tuple:
     """
-    Extract [best-matching heading → next heading] from page text.
+    Trim text to [best-matching heading → end of chunk].
 
-    Returns (extracted_text, reached_end_of_chunk).
-    reached_end_of_chunk=True  → section likely continues on the next page.
-    reached_end_of_chunk=False → a new heading was found; section ends here.
-    Falls back to full text when no heading match found.
+    Intentionally does NOT try to detect the next sibling heading within the
+    same chunk — that caused premature truncation when sub-headings, notes, or
+    status lines inside the section were misidentified as closing headings,
+    losing content like the 'Change Reason' instructions.
+
+    Returns (trimmed_text, found_heading).
+    found_heading=True means the LLM should also see the next page because the
+    section may continue past the chunk boundary.
     """
     if not text or not section_query:
         return text, False
@@ -1009,24 +1013,13 @@ def _extract_section_text(text: str, section_query: str) -> tuple:
         if score > best_score:
             best_score, best_idx = score, i
 
-    if best_idx == -1 or best_score < 1:
-        return text, False      # no match — leave chunk unchanged
+    if best_idx <= 0 or best_score < 1:
+        # Heading at very top (best_idx == 0) means no preamble to trim;
+        # heading not found means leave chunk unchanged.
+        return text, best_score >= 1
 
-    # Scan forward for the next heading (a structural line that scores lower)
-    end_idx, found_next = len(lines), False
-    for i in range(best_idx + 2, len(lines)):
-        s = lines[i].strip()
-        if not s:
-            continue
-        if (_looks_like_heading(s)
-                and _heading_match(section_query, s) < best_score
-                and not _HEADING_SKIP.search(s)):
-            end_idx, found_next = i, True
-            break
-
-    extracted = '\n'.join(lines[best_idx:end_idx]).strip()
-    reached_end = not found_next
-    return extracted, reached_end
+    trimmed = '\n'.join(lines[best_idx:]).strip()
+    return trimmed, True   # always pass next page — the section may continue
 
 
 def get_table_image(filename: str, page_num: int, heading_hint: str = "") -> str | None:
@@ -2727,11 +2720,19 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                         )
                         if _nxt:
                             _sec_seen.add(_nsp)
-                            # Take continuation up to the first new heading
+                            # Continuation: include up to a heading that shares
+                            # ZERO words with the section query (sibling section).
+                            # Headings that share ≥1 word (e.g. "Add Row" shares
+                            # "row" with "delete row") are sub-topics still part
+                            # of the same section, so we keep reading past them.
                             _nxt_lines = _nxt.get("text", "").splitlines()
                             _nxt_end = len(_nxt_lines)
                             for _li, _ll in enumerate(_nxt_lines):
-                                if _li > 1 and _looks_like_heading(_ll.strip()):
+                                _ls = _ll.strip()
+                                if (_li > 1
+                                        and _looks_like_heading(_ls)
+                                        and not _HEADING_SKIP.search(_ls)
+                                        and _heading_match(_section_query, _ls) == 0):
                                     _nxt_end = _li
                                     break
                             _nxt_copy = dict(_nxt)
