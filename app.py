@@ -2,9 +2,67 @@ import streamlit as st
 import os
 import re
 import json
+import html as _html_lib
 from pathlib import Path
 import base64
 from io import BytesIO
+
+# ── Disk cache helpers (persist processed docs across restarts) ────────────────
+_CACHE_DIR   = Path(__file__).parent / ".docucache"
+_CHUNKS_FILE = _CACHE_DIR / "chunks.pkl"
+_EMB_FILE    = _CACHE_DIR / "embeddings.npy"
+_META_FILE   = _CACHE_DIR / "meta.json"
+
+
+def _cache_save() -> None:
+    """Persist chunks (images stripped) + embeddings to disk. Best-effort."""
+    try:
+        import pickle, numpy as np
+        _CACHE_DIR.mkdir(exist_ok=True)
+        slim = [{k: v for k, v in c.items() if k != "images"}
+                for c in st.session_state.doc_chunks]
+        _CHUNKS_FILE.write_bytes(pickle.dumps(slim))
+        if st.session_state.embeddings is not None:
+            np.save(str(_EMB_FILE), st.session_state.embeddings)
+        _META_FILE.write_text(
+            json.dumps({"loaded_files": st.session_state.loaded_files}),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _cache_load() -> bool:
+    """Load cached chunks + embeddings. Returns True on success."""
+    try:
+        import pickle, numpy as np
+        if not (_CHUNKS_FILE.exists() and _EMB_FILE.exists() and _META_FILE.exists()):
+            return False
+        chunks = pickle.loads(_CHUNKS_FILE.read_bytes())
+        embs   = np.load(str(_EMB_FILE))
+        meta   = json.loads(_META_FILE.read_text(encoding="utf-8"))
+        st.session_state.doc_chunks    = chunks
+        st.session_state.embeddings    = embs
+        st.session_state.loaded_files  = meta.get("loaded_files", [])
+        # Re-attach PDF bytes for folder-based files that still exist on disk
+        for c in chunks:
+            src = c.get("source", "")
+            if src.lower().endswith(".pdf") and src not in st.session_state.doc_pdf_bytes:
+                p = Path(src)
+                if p.exists():
+                    st.session_state.doc_pdf_bytes[src] = p.read_bytes()
+        return True
+    except Exception:
+        return False
+
+
+def _cache_clear() -> None:
+    """Delete disk cache files."""
+    for f in (_CHUNKS_FILE, _EMB_FILE, _META_FILE):
+        try:
+            f.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 # ── Page config ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -614,14 +672,17 @@ except ImportError:
 # ── Session state ─────────────────────────────────────────────────────────────
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "doc_pdf_bytes" not in st.session_state:
+    st.session_state.doc_pdf_bytes = {}
 if "doc_chunks" not in st.session_state:
-    st.session_state.doc_chunks = []   # list of {text, source, page, images, tables}
+    st.session_state.doc_chunks   = []
+    st.session_state.embeddings   = None
+    st.session_state.loaded_files = []
+    _cache_load()                          # restore from disk on fresh session
 if "embeddings" not in st.session_state:
     st.session_state.embeddings = None
 if "loaded_files" not in st.session_state:
     st.session_state.loaded_files = []
-if "doc_pdf_bytes" not in st.session_state:
-    st.session_state.doc_pdf_bytes = {}   # filename → raw PDF bytes for page rendering
 if "page_img_cache" not in st.session_state:
     st.session_state.page_img_cache = {}  # (filename, page_num, mode) → base64 PNG
 if "folder_path_input" not in st.session_state:
@@ -1461,10 +1522,14 @@ def retrieve(query: str, chunks, embeddings, top_k=5):
 
     candidate_global = [pool_idx[i] for i in candidate_local]
 
-    # Cache query embedding
+    # Cache query embedding — bounded LRU (evict oldest half when over 256)
     if "q_emb_cache" not in st.session_state:
         st.session_state.q_emb_cache = {}
     if query not in st.session_state.q_emb_cache:
+        if len(st.session_state.q_emb_cache) >= 256:
+            evict = list(st.session_state.q_emb_cache.keys())[:128]
+            for _k in evict:
+                del st.session_state.q_emb_cache[_k]
         embedder = get_embedder()
         st.session_state.q_emb_cache[query] = embedder.encode(
             [query], show_progress_bar=False, convert_to_numpy=True
@@ -1623,7 +1688,8 @@ def build_context(relevant_chunks):
     return "\n\n---\n\n".join(parts)
 
 
-def ask_llm(query: str, context: str, vision_images: list = None, table_query: bool = False) -> str:
+def ask_llm(query: str, context: str, vision_images: list = None,
+            table_query: bool = False, stream_slot=None) -> str:
     """
     vision_images: optional list of (b64, src, page) for relevant non-table images.
     table_query:   True when the user is asking for a schedule/table — triggers a
@@ -1747,6 +1813,26 @@ def ask_llm(query: str, context: str, vision_images: list = None, table_query: b
         ),
     })
     try:
+        # Stream tokens into the provided slot for instant perceived performance
+        if stream_slot is not None and not vision_images:
+            _buf = ""
+            with client.messages.stream(
+                model="claude-sonnet-4-6",
+                max_tokens=4096,
+                system=system,
+                messages=[{"role": "user", "content": user_content}],
+            ) as _s:
+                for _tok in _s.text_stream:
+                    _buf += _tok
+                    stream_slot.markdown(
+                        f'<div class="msg-bot">'
+                        f'<div class="avatar">🤖</div>'
+                        f'<div class="bubble" style="font-size:.93rem;line-height:1.75;">'
+                        f'{_html_lib.escape(_buf)}▋</div></div>',
+                        unsafe_allow_html=True,
+                    )
+            stream_slot.empty()
+            return _buf
         msg = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=4096,
@@ -1847,22 +1933,6 @@ def render_answer(answer: str, relevant_chunks):
     return answer_html, images, extra_tables
 
 
-def _md_table_to_html(lines):
-    if not lines:
-        return ""
-    # Filter separator lines (---|---|---)
-    rows = [l for l in lines if not re.match(r"^\|[\s\-|:]+\|$", l)]
-    html = "<table>"
-    for i, row in enumerate(rows):
-        cells = [c.strip() for c in row.strip("|").split("|")]
-        html += "<tr>"
-        tag = "th" if i == 0 else "td"
-        for c in cells:
-            html += f"<{tag}>{c}</{tag}>"
-        html += "</tr>"
-    html += "</table>"
-    return html
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
@@ -1917,6 +1987,7 @@ with st.sidebar:
         st.session_state.doc_pdf_bytes = {}
         st.session_state.page_img_cache = {}
         st.session_state.learned_answers = []
+        _cache_clear()                         # wipe disk cache on full clear
         st.session_state["_folder_reset"] = True
         st.session_state.pop("_awaiting_feedback", None)
         st.session_state.pop("_feedback_query", None)
@@ -1983,6 +2054,7 @@ with st.sidebar:
                             )
                         else:
                             st.session_state.embeddings = new_embs
+                _cache_save()  # persist so next restart is instant
                 st.success(f"Loaded {len(new_chunks)} chunks from {len(tasks)} file(s)!")
 
     st.markdown("---")
@@ -2080,7 +2152,8 @@ else:
             _qbubble_col, _qcopy_col, _qreload_col = st.columns([9.0, 0.5, 0.5])
             with _qbubble_col:
                 st.markdown(
-                    f'<div class="msg-user"><div class="bubble">{_q_text}</div></div>',
+                    f'<div class="msg-user"><div class="bubble">'
+                    f'{_html_lib.escape(_q_text)}</div></div>',
                     unsafe_allow_html=True,
                 )
             with _qcopy_col:
@@ -2731,7 +2804,8 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                                 display_images.append((_fi, _fc["source"], _fc["page"] + _offset))
 
             raw_answer = ask_llm(pending, context, vision_images=vision_images,
-                                 table_query=_is_table_q)
+                                 table_query=_is_table_q,
+                                 stream_slot=thinking_slot if not _is_table_q else None)
             thinking_slot.empty()
             answer_html, _, extra_tables = render_answer(raw_answer, relevant)
 
