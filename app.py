@@ -2090,8 +2090,18 @@ else:
                 )
                 if st.button("📋", key=f"copy_q_{_msg_idx}",
                              use_container_width=True, help="Copy question"):
-                    _ck = f"_show_copy_q_{_msg_idx}"
-                    st.session_state[_ck] = not st.session_state.get(_ck, False)
+                    _js_q = json.dumps(_q_text)
+                    st.markdown(
+                        f"<script>(function(){{var t={_js_q};"
+                        "navigator.clipboard&&navigator.clipboard.writeText(t)"
+                        ".catch(function(){var e=document.createElement('textarea');"
+                        "e.value=t;e.style.cssText='position:fixed;opacity:0';"
+                        "document.body.appendChild(e);e.select();"
+                        "document.execCommand('copy');document.body.removeChild(e);});"
+                        "})();</script>",
+                        unsafe_allow_html=True,
+                    )
+                    st.toast("Copied to clipboard!", icon="📋")
                 st.markdown('</div>', unsafe_allow_html=True)
             with _qreload_col:
                 st.markdown(
@@ -2103,9 +2113,6 @@ else:
                     st.session_state["_pending_query"] = _q_text
                     st.rerun()
                 st.markdown('</div>', unsafe_allow_html=True)
-            if st.session_state.get(f"_show_copy_q_{_msg_idx}"):
-                st.caption("Your question — click the copy icon to copy:")
-                st.code(_q_text, language=None)
         else:
             answer_html = msg.get("answer_html", msg["content"])
             images = msg.get("images", [])
@@ -2120,10 +2127,20 @@ else:
             </div>
             """, unsafe_allow_html=True)
 
-            # Copy answer — st.expander shows the text with Streamlit's built-in copy icon
-            with st.expander("📋 Copy Answer Text"):
-                st.caption("Answer text — click the copy icon to copy:")
-                st.code(msg.get("content", ""), language=None)
+            # Copy answer — direct JS clipboard copy, no code block shown
+            if st.button("📋 Copy Answer", key=f"copy_a_{_msg_idx}", help="Copy answer text"):
+                _js_a = json.dumps(msg.get("content", ""))
+                st.markdown(
+                    f"<script>(function(){{var t={_js_a};"
+                    "navigator.clipboard&&navigator.clipboard.writeText(t)"
+                    ".catch(function(){var e=document.createElement('textarea');"
+                    "e.value=t;e.style.cssText='position:fixed;opacity:0';"
+                    "document.body.appendChild(e);e.select();"
+                    "document.execCommand('copy');document.body.removeChild(e);});"
+                    "})();</script>",
+                    unsafe_allow_html=True,
+                )
+                st.toast("Copied to clipboard!", icon="📋")
 
             # Inline images — rendered as data URIs to avoid Streamlit's media
             # file registry (which causes "Missing file" errors on reconnect).
@@ -2239,16 +2256,18 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                 document.querySelectorAll('button').forEach(function(b) {
                     if (b.innerText.trim() === 'Cancel Query') {
                         b.style.cssText = [
-                            'background:transparent!important',
-                            'border:none!important',
+                            'background:#1a1a2e!important',
+                            'border:1px solid rgba(240,192,96,.35)!important',
+                            'border-radius:8px!important',
                             'box-shadow:none!important',
                             'color:#f0eeff!important',
-                            'font-size:1rem!important',
+                            'font-size:0.9rem!important',
                             'font-weight:600!important',
-                            'padding:4px 0!important',
+                            'padding:6px 16px!important',
                             'text-decoration:none!important',
                             'outline:none!important',
                             'width:auto!important',
+                            'cursor:pointer!important',
                         ].join(';');
                     }
                 });
