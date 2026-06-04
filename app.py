@@ -1159,7 +1159,11 @@ def _doc_filter(query: str, all_chunks: list) -> tuple:
     q_lower = query.lower()
     sources = list({c["source"] for c in all_chunks})
 
-    matched = []
+    # Score each document by how many of its distinctive identifiers appear in
+    # the query. "annotated eCRF" scores 1 (only "ecrf" matches) while
+    # "eCRF completion guidelines" scores 3+ when the query says
+    # "eCRF completion guidelines" — the more specific doc wins.
+    match_scores: dict = {}
     for src in sources:
         stem = Path(src).stem
         # Split on common separators, lowercase each part
@@ -1169,14 +1173,20 @@ def _doc_filter(query: str, all_chunks: list) -> tuple:
         # Also test the full stem (space-normalised) as a phrase
         stem_phrase = re.sub(r'[\-_\.]+', ' ', stem.lower())
         identifiers = distinctive + [stem_phrase]
-        # Use word-boundary matching so "check" in a filename does not match
-        # "checks" in the query (substring match caused Edit Check Spec to be
-        # included when user asked "from the DRP" with "checks" in the query).
-        if any(
-            ident and re.search(r'\b' + re.escape(ident) + r'\b', q_lower)
-            for ident in identifiers
-        ):
-            matched.append(src)
+        score = sum(
+            1 for ident in identifiers
+            if ident and re.search(r'\b' + re.escape(ident) + r'\b', q_lower)
+        )
+        if score > 0:
+            match_scores[src] = score
+
+    matched = []
+    if match_scores:
+        best = max(match_scores.values())
+        # Only keep docs that tie for the best score — partial matches (score < best)
+        # are less specific and excluded (e.g. "annotated eCRF" scores 1 while
+        # "eCRF completion guidelines" scores 3 for the same query).
+        matched = [src for src, s in match_scores.items() if s == best]
 
     if not matched:
         # For schedule/table queries prefer protocol-named documents
