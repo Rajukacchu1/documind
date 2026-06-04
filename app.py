@@ -2535,13 +2535,42 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
                 if _query_col_filters or _src_is_tabular:
                     relevant = _all_matched
 
+        # ── Build a section-focused query for heading scoring ────────────────
+        # When a specific document is named in the query (e.g. "delete row from
+        # eCRF completion guidelines"), the doc-name words ("ecrf", "completion",
+        # "guidelines") inflate scores for document-title chunks over the actual
+        # section heading ("Delete Row").  Strip those words so only the topic
+        # words remain for heading matching.
+        _section_query = pending
+        if _matched_srcs and _matched_srcs != _all_srcs:
+            for _src in _matched_srcs:
+                _stem = Path(_src).stem
+                _parts = re.split(r'[\s\-_\.]+', _stem.lower())
+                for _p in _parts:
+                    if len(_p) >= 3 and _p not in _DOC_GENERIC:
+                        _section_query = re.sub(
+                            r'\b' + re.escape(_p) + r'\b', '',
+                            _section_query, flags=re.IGNORECASE,
+                        )
+                _phrase = re.sub(r'[\-_\.]+', ' ', _stem.lower())
+                _section_query = re.sub(
+                    r'\b' + re.escape(_phrase) + r'\b', '',
+                    _section_query, flags=re.IGNORECASE,
+                )
+            _section_query = _section_query.strip()
+            # Safety: if stripping leaves <2 meaningful words, fall back
+            _sq_words = {w for w in re.findall(r'\b\w{3,}\b', _section_query.lower())
+                         if w not in _H_STOP}
+            if len(_sq_words) < 2:
+                _section_query = pending
+
         # ── Score each chunk by heading match ────────────────────────────────
         # Done BEFORE building context so we can trim relevant to the best-
         # matching section(s) before the LLM sees it.
         for c in relevant:
             c["_hscore"] = max(
-                _heading_match(pending, c.get("heading", "")),
-                _text_heading_match(pending, c.get("text", "")),
+                _heading_match(_section_query, c.get("heading", "")),
+                _text_heading_match(_section_query, c.get("text", "")),
             )
         best_hscore = max((c["_hscore"] for c in relevant), default=0)
 
