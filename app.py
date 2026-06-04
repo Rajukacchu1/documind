@@ -2590,6 +2590,28 @@ div[data-testid="stHorizontalBlock"] div[data-testid="stButton"] button:hover {
             if _best_chunks:
                 relevant = _best_chunks
 
+        # ── Cap context for named text-document section queries ───────────────
+        # When the user names a specific document (not all docs) and queries a
+        # text section (not a table/col-filter/domain query), limit to the top-3
+        # chunks so the LLM never receives the full document as context — even
+        # when heading match fails (e.g. section is titled "Removing Records"
+        # while query says "delete row").  retrieve() already orders by semantic
+        # similarity, so the most-relevant section is first; we sort by heading
+        # score first, then by semantic rank to keep the best match at the top.
+        _is_named_text_doc = (
+            _matched_srcs and _matched_srcs != _all_srcs
+            and not _query_col_filters and not _is_table_q and not _query_domain
+            and not any(s.lower().endswith((".xlsx", ".xls", ".csv"))
+                        for s in _matched_srcs)
+        )
+        if _is_named_text_doc and len(relevant) > 3:
+            _ranked = sorted(
+                enumerate(relevant),
+                key=lambda ic: (-ic[1]["_hscore"], ic[0]),  # best score first, then semantic rank
+            )
+            relevant = [c for _, c in _ranked[:3]]
+            best_hscore = max((c["_hscore"] for c in relevant), default=0)
+
         context = build_context(relevant)
 
         # ── Image classification (table / relevant / irrelevant) ─────────────
